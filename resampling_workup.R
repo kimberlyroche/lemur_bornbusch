@@ -430,12 +430,15 @@ cat("Year 1 zeros:",round(zero.y1.before*100, 2),"% ->",round(zero.y1.after*100,
 cat("Year 2 zeros:",round(zero.y2.before*100, 2),"% ->",round(zero.y2.after*100, 2),"%\n")
 
 # how ab-normal are these? pretty bad...
-par(mfrow=c(2,2))
-plot(density(log(as.matrix(get_counts(all_data$`16S`$year1$filtered))+0.5)))
-plot(density(log(as.matrix(get_counts(all_data$`16S`$year2$filtered))+0.5)))
-plot(density(log(as.matrix(get_counts(all_data$`ITS`$year1$filtered))+0.5)))
-plot(density(log(as.matrix(get_counts(all_data$`ITS`$year2$filtered))+0.5)))
-# dev.off()
+df <- data.frame(x=c(log(as.matrix(get_counts(all_data$`16S`$year1$filtered))+0.5)), type="16S year1")
+df <- rbind(df, data.frame(x=c(log(as.matrix(get_counts(all_data$`16S`$year2$filtered))+0.5)), type="16S year2"))
+df <- rbind(df, data.frame(x=c(log(as.matrix(get_counts(all_data$`ITS`$year1$filtered))+0.5)), type="ITS year1"))
+df <- rbind(df, data.frame(x=c(log(as.matrix(get_counts(all_data$`ITS`$year2$filtered))+0.5)), type="ITS year2"))
+
+p <- ggplot(df, aes(x)) +
+  geom_density() +
+  facet_wrap(. ~ type, nrow=1)
+ggsave("images/log_densities.png", p, units="in", dpi=150, height=3, width=12)
 
 # delete these to keep ourselves honeset and prevent reusing the wrong year's content
 rm(year.all)
@@ -450,7 +453,7 @@ rm(exclude_samples)
 # ============================================================================================================
 
 # define covariates and hyperparameters
-treatment <- "ABXFT" # "CON", "ABX", "ABXFT"
+treatment <- "ABX" # "CON", "ABX", "ABXFT"
 
 # do we need to subset to matched samples for 16S and ITS?
 evaluate <- "both" # "both", "16S", "ITS"
@@ -551,7 +554,7 @@ if(evaluate == "16S" | evaluate == "ITS") {
   eta <- t(driver::clr(t(Y) + 0.5)) # we'll use this to calculate overall CLR means
                                     # (for now)
   N <- ncol(Y)
-  resample_it <- 100
+  resample_it <- 200
   eta.resampled <- array(NA, dim=c(D, N, resample_it))
   for(j in 1:resample_it) {
     # sample posterior of a multinomial-Dirichlet
@@ -568,7 +571,7 @@ if(evaluate == "16S" | evaluate == "ITS") {
   eta <- rbind(t(driver::clr(t(Y[1:D.16S,]) + 0.5)),
                t(driver::clr(t(Y[(D.16S+1):D,]) + 0.5)))
   N <- ncol(Y)
-  resample_it <- 100
+  resample_it <- 200
   eta.resampled <- array(NA, dim=c(D, N, resample_it))
   for(j in 1:resample_it) {
     # sample posterior of a multinomial-Dirichlet
@@ -610,9 +613,9 @@ unique.animals.y2 <- unique(as.character(animals.y2))
 # set up kernel over samples
 # parameter settings are utterly fucking heuristic rn
 dc <- 0.01 # desired minimum correlation
-dd_se <- 10
+dd_se <- 7
 rho_se <- sqrt(-dd_se^2/(2*log(dc))) # back calculate the decay
-g_sigma <- 10
+g_sigma <- 1.5
 
 Gamma <- function(X) {
   SE(X[1,,drop=F], sigma=g_sigma, rho=rho_se, jitter=1e-10) # time only
@@ -802,19 +805,42 @@ Theta.assignments <- c(Theta.assignments, Theta.assignments.append)
 predictions <- GPpredict(X, X_predict, posterior$Lambda, posterior$Sigma, D, resample_it)
 
 # ============================================================================================================
-#   SANITY CHECK THE ESTIMATES
+#   QUICK VISUALIZATION, SANITY CHECK THE ESTIMATES
 # ============================================================================================================
 
+# look at the average Sigma
+mean_Sigma <- apply(posterior$Sigma, c(1,2), mean)
+mean_Sigma_corr <- cov2cor(mean_Sigma)
+mean_Sigma_long <- driver::gather_array(mean_Sigma_corr, "value", "row", "col")
+
+p <- ggplot(mean_Sigma_long, aes(row, col, fill=value)) + 
+  geom_tile() +
+  scale_fill_gradient2(low="darkblue", high="darkred", name="correlation")
+ggsave(paste0("images/paired_correlation_",treatment,".png"), plot=p, units="in", dpi=150, height=6, width=7.5)
+
 if(evaluate == "both") {
-  for(it in 1:6) {
+  lr_coords <- c(sample(1:D.16S)[1:2], sample(1:D.ITS)[1:2])
+  for(it in 1:4) {
     # choose a logratio_coordinate
-    lr_coord <- sample(1:D)[1]
+    lr_coord <- lr_coords[it]
     
     # choose an individual ID
     indiv.y1 <- sample(unique(ids.y1))[1]
     indiv.y2 <- sample(unique(ids.y2))[1]
     
-    cat("Examining log ratio coordinate",lr_coord,"in individuals",unique.animals.y1[[indiv.y1]],"and",unique.animals.y2[[indiv.y2]],"...\n")
+    if(it < 3) {
+      # 16S
+      label_level <- max(which(!is.na(all_data$`16S`$year1$filtered[lr_coord,1:6])))
+      label <- paste(names(all_data$`16S`$year1$filtered[label_level]), all_data$`16S`$year1$filtered[lr_coord,label_level])
+      all_data$`16S`$year1$filtered[lr_coord,]
+      cat("Examining 16S log ratio coordinate",lr_coord,"(",label,") in individuals",unique.animals.y1[[indiv.y1]],"and",unique.animals.y2[[indiv.y2]],"...\n")
+    } else {
+      # ITS
+      label_level <- max(which(!is.na(all_data$`ITS`$year1$filtered[lr_coord,1:6])))
+      label <- paste(names(all_data$`ITS`$year1$filtered[label_level]), all_data$`ITS`$year1$filtered[lr_coord,label_level])
+      all_data$`ITS`$year1$filtered[lr_coord,]
+      cat("Examining ITS log ratio coordinate",lr_coord,"(",label,") in individuals",unique.animals.y1[[indiv.y1]],"and",unique.animals.y2[[indiv.y2]],"...\n")
+    }
     
     # get truth and predictions for YEAR 1
     ground.eta.y1 <- gather_array(eta[,idx.animals.y1[[indiv.y1]]], value, "taxon", "sample")
@@ -872,30 +898,50 @@ if(evaluate == "both") {
                 p97.5 = quantile(value, prob=0.975)) %>%
       ungroup()
     
-    plot.eta.y1 <- merge(ground.eta.y1, sample_quantiles.y1, by="sample")
-    plot.eta.y2 <- merge(ground.eta.y2, sample_quantiles.y2, by="sample")
-    
-    p.y1 <- ggplot(plot.eta.y1) +
-      geom_ribbon(aes(x=sample, ymin=p2.5, ymax=p97.5), fill="darkgrey", alpha=0.5) +
-      geom_ribbon(aes(x=sample, ymin=p25, ymax=p75), fill="darkgrey", alpha=0.9) +
-      geom_line(aes(x=sample, y=mean), color="blue") +
-      geom_point(aes(x=sample, y=value), alpha=0.5) +
+    p.y1 <- ggplot() +
+      geom_ribbon(data=sample_quantiles.y1, aes(x=sample, ymin=p2.5, ymax=p97.5), fill="darkgrey", alpha=0.5) +
+      geom_ribbon(data=sample_quantiles.y1, aes(x=sample, ymin=p25, ymax=p75), fill="darkgrey", alpha=0.9) +
+      geom_line(data=sample_quantiles.y1, aes(x=sample, y=mean), color="blue") +
       xlab("day") +
-      ylab("CLR(taxon)") +
-      ggtitle(paste0("Treatment = ",treatment,", Individual = ",unique.animals.y1[[indiv.y1]],", Year = 1, Taxon = #",lr_coord))
-    p.y2 <- ggplot(plot.eta.y2) +
-      geom_ribbon(aes(x=sample, ymin=p2.5, ymax=p97.5), fill="darkgrey", alpha=0.5) +
-      geom_ribbon(aes(x=sample, ymin=p25, ymax=p75), fill="darkgrey", alpha=0.9) +
-      geom_line(aes(x=sample, y=mean), color="blue") +
-      geom_point(aes(x=sample, y=value), alpha=0.5) +
+      ylab(paste0("CLR(abundance)")) +
+      #theme(axis.title=element_text(size=12)) +
+      ggtitle(paste0("Treatment = ",treatment,", Individual = ",unique.animals.y1[[indiv.y1]],", Year = 1, Taxon = ",label))
+    p.y1 <- p.y1 + 
+      geom_point(data=ground.eta.y1, aes(x=sample, y=value))
+    p.y2 <- ggplot() +
+      geom_ribbon(data=sample_quantiles.y2, aes(x=sample, ymin=p2.5, ymax=p97.5), fill="darkgrey", alpha=0.5) +
+      geom_ribbon(data=sample_quantiles.y2, aes(x=sample, ymin=p25, ymax=p75), fill="darkgrey", alpha=0.9) +
+      geom_line(data=sample_quantiles.y2, aes(x=sample, y=mean), color="blue") +
       xlab("day") +
-      ylab("CLR(taxon)") +
-      ggtitle(paste0("Treatment = ",treatment,", Individual = ",unique.animals.y2[[indiv.y2]],", Year = 2, Taxon = #",lr_coord))
+      ylab(paste0("CLR(abundance)")) +
+      #theme(axis.title=element_text(size=12)) +
+      ggtitle(paste0("Treatment = ",treatment,", Individual = ",unique.animals.y2[[indiv.y2]],", Year = 2, Taxon = ",label))
+    p.y2 <- p.y2 + 
+      geom_point(data=ground.eta.y2, aes(x=sample, y=value))
     
     g <- grid.arrange(p.y1, p.y2, nrow=2)
-    ggsave(paste0("images/paired_sanity_",treatment,"_",lr_coord,".png"), plot=g, units="in", dpi=150, height=6, width=12)
+    if(it < 3) {
+      ggsave(paste0("images/paired_sanity_",treatment,"_16S_",lr_coord,".png"), plot=g, units="in", dpi=150, height=6, width=12)
+    } else {
+      ggsave(paste0("images/paired_sanity_",treatment,"_ITS_",lr_coord,".png"), plot=g, units="in", dpi=150, height=6, width=12)
+    }
   }
 }
-  
-  
-  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
