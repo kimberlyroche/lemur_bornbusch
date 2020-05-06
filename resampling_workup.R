@@ -35,10 +35,12 @@ agg_16S_level <- "genus"
 agg_ITS_level <- "genus"
 
 # define covariates and hyperparameters
-treatment <- "ABX" # "CON", "ABX", "ABXFT"
+treatment <- "ABXFT" # "CON", "ABX", "ABXFT"
 
 # do we need to subset to matched samples for 16S and ITS?
 evaluate <- "both" # "both", "16S", "ITS"
+
+remove_baseline <- TRUE
 
 # ============================================================================================================
 #   FUNCTIONS
@@ -413,6 +415,19 @@ if(evaluate == "16S" | evaluate == "both") {
   # zero.y2.after <- sum(get_counts(year2$filtered) == 0)/(nrow(get_counts(year2$filtered))*ncol(get_counts(year2$filtered)))
   # cat("Year 1 zeros:",round(zero.y1.before*100, 2),"% ->",round(zero.y1.after*100, 2),"%\n")
   # cat("Year 2 zeros:",round(zero.y2.before*100, 2),"% ->",round(zero.y2.after*100, 2),"%\n")
+  
+  # test this: if in a treatment group, exclude before and after samples to see if signal increases
+  if(treatment != "CON" & remove_baseline) {
+    include_samples <- !str_detect(all_data$`16S`$year1$metadata$Period, "Pre")
+    all_data$`16S`$year1$metadata <- all_data$`16S`$year1$metadata[include_samples,]
+    all_data$`16S`$year1$filtered <- all_data$`16S`$year1$filtered[,colnames(all_data$`16S`$year1$filtered) %in% c("kingdom",
+                                                                                                                   "phylum",
+                                                                                                                   "class",
+                                                                                                                   "order",
+                                                                                                                   "family",
+                                                                                                                   "genus",
+                                                                                                                   as.character(all_data$`16S`$year1$metadata$Description))]
+  }
 }
 
 if(evaluate == "ITS" | evaluate == "both") {
@@ -486,8 +501,21 @@ if(evaluate == "ITS" | evaluate == "both") {
                           filtered.all$counts[,colnames(filtered.all$counts) %in% year1$metadata$SampleID])
   year2$filtered <- cbind(filtered.all$tax,
                           filtered.all$counts[,colnames(filtered.all$counts) %in% year2$metadata$SampleID])
-  
+    
   all_data[["ITS"]] <- list(year1=year1, year2=year2)
+  
+  if(treatment != "CON" & remove_baseline) {
+    include_samples <- !str_detect(all_data$ITS$year1$metadata$Period, "Pre")
+    all_data$ITS$year1$metadata <- all_data$ITS$year1$metadata[include_samples,]
+    all_data$ITS$year1$filtered <- all_data$ITS$year1$filtered[,colnames(all_data$ITS$year1$filtered) %in% c("kingdom",
+                                                                                                             "phylum",
+                                                                                                             "class",
+                                                                                                             "order",
+                                                                                                             "family",
+                                                                                                             "genus",
+                                                                                                             as.character(all_data$ITS$year1$metadata$Description))]
+  }
+  
 }
 
 str(all_data, max.level=3)
@@ -1076,53 +1104,67 @@ do_plot <- TRUE
 fileout <- paste0("correlations_",evaluate,"_",treatment,".txt")
 unlink(fileout)
 
+correlation_threshold <- 0.4
+
 # output these by name
 for(hcf in high_conf_idx) {
-  if(evaluate == "16S" | evaluate == "ITS") {
-    tax1.idx <- correlations_quantiles[hcf,]$taxon1
-    tax2.idx <- correlations_quantiles[hcf,]$taxon2
-    if(evaluate == "16S") {
-      tax1.label <- get_16S_label(tax1.idx)
-      tax2.label <- get_16S_label(tax2.idx)
-    } else {
-      tax1.label <- get_ITS_label(tax1.idx)
-      tax2.label <- get_ITS_label(tax2.idx)
-    }
-    corr.value <- correlations_quantiles[hcf,]$mean
-    if(abs(corr.value) > 0.4) {
-      # write to stdout
-      cat("Labels:",hcf,",",tax1.label,",",tax2.label,", corr=",corr.value,"\n")
-      # write to file
-      write(paste0(tax1.label,"\t",tax2.label,"\t",round(corr.value,3)), file=fileout, append=TRUE)
-    }
-  } else {
+  #if(evaluate == "16S" | evaluate == "ITS") {
+  #  tax1.idx <- correlations_quantiles[hcf,]$taxon1
+  #  tax2.idx <- correlations_quantiles[hcf,]$taxon2
+  #  if(evaluate == "16S") {
+  #    tax1.label <- get_16S_label(tax1.idx)
+  #    tax2.label <- get_16S_label(tax2.idx)
+  #  } else {
+  #    tax1.label <- get_ITS_label(tax1.idx)
+  #    tax2.label <- get_ITS_label(tax2.idx)
+  #  }
+  #  corr.value <- correlations_quantiles[hcf,]$mean
+  #  if(abs(corr.value) > correlation_threshold) {
+  #    # write to stdout
+  #    cat("Labels:",hcf,",",tax1.label,",",tax2.label,", corr=",corr.value,"\n")
+  #    # write to file
+  #    write(paste0(tax1.label,"\t",tax2.label,"\t",round(corr.value,3)), file=fileout, append=TRUE)
+  #  }
+  #} else {
     # evaluate both
     tax1.idx <- correlations_quantiles[hcf,]$taxon1
     tax2.idx <- correlations_quantiles[hcf,]$taxon2
     tax1.idx.offset <- tax1.idx
     tax2.idx.offset <- tax2.idx
-    if(tax1.idx > D.16S) {
-      tax1.idx <- tax1.idx - D.16S
-      tax1.type <- "ITS"
-      tax1.label <- get_ITS_label(tax1.idx)
-    } else {
-      tax1.type <- "16S"
+    tax1.type <- evaluate
+    tax2.type <- evaluate
+    if(evaluate == "16S") {
       tax1.label <- get_16S_label(tax1.idx)
-    }
-    if(tax2.idx > D.16S) {
-      tax2.idx <- tax2.idx - D.16S
-      tax2.type <- "ITS"
-      tax2.label <- get_ITS_label(tax2.idx)
-    } else {
-      tax2.type <- "16S"
       tax2.label <- get_16S_label(tax2.idx)
+    }
+    if(evaluate == "ITS") {
+      tax1.label <- get_ITS_label(tax1.idx)
+      tax2.label <- get_ITS_label(tax2.idx)
+    }
+    if(evaluate == "both") {
+      if(tax1.idx > D.16S) {
+        tax1.idx <- tax1.idx - D.16S
+        tax1.type <- "ITS"
+        tax1.label <- get_ITS_label(tax1.idx)
+      } else {
+        tax1.type <- "16S"
+        tax1.label <- get_16S_label(tax1.idx)
+      }
+      if(tax2.idx > D.16S) {
+        tax2.idx <- tax2.idx - D.16S
+        tax2.type <- "ITS"
+        tax2.label <- get_ITS_label(tax2.idx)
+      } else {
+        tax2.type <- "16S"
+        tax2.label <- get_16S_label(tax2.idx)
+      }
     }
     
     # get mean correlation
     corr.value <- correlations_quantiles[hcf,]$mean
-    if(abs(corr.value) > 0.5) {
+    if(abs(corr.value) > correlation_threshold) {
       # write to stdout
-      cat("Labels:",hcf,",",tax1.label,"(",tax1.type,"),",tax2.label,"(",tax2.type,"), corr=",corr.value,"\n")
+      cat(paste0("Labels: ",hcf,", ",tax1.label," (",tax1.type,"), ",tax2.label," (",tax2.type,"), corr=",corr.value,"\n"))
       # write to file
       write(paste0(tax1.label," (",tax1.type,")\t",tax2.label," (",tax2.type,")\t",round(corr.value,3)), file=fileout, append=TRUE)
       
@@ -1302,12 +1344,12 @@ for(hcf in high_conf_idx) {
             
             g <- grid.arrange(p.t1.y1, p.t1.y2,
                               p.t2.y1, p.t2.y2, nrow=2)
-            ggsave(paste0("images/paired_highconf_",hcf,"_",indiv.y1,"x",indiv.y2,"_",treatment,".png"), plot=g, units="in", dpi=150, height=3, width=12)
+            ggsave(paste0("images/",evaluate,"_paired_highconf_",hcf,"_",indiv.y1,"x",indiv.y2,"_",treatment,".png"), plot=g, units="in", dpi=150, height=3, width=12)
           }
         }
       }
     }
-  }
+  #}
 }
 
 
