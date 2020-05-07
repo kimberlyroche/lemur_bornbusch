@@ -13,6 +13,7 @@ library(driver)
 #library(igraph)
 library(Rcpp)
 library(LaplacesDemon)
+library(grid)
 library(gridExtra)
 
 setwd("C:/Users/kim/Documents/lemur_bornbusch/")
@@ -38,7 +39,7 @@ agg_ITS_level <- "genus"
 treatment <- "ABXFT" # "CON", "ABX", "ABXFT"
 
 # do we need to subset to matched samples for 16S and ITS?
-evaluate <- "both" # "both", "16S", "ITS"
+evaluate <- "16S" # "both", "16S", "ITS"
 
 remove_baseline <- TRUE
 
@@ -1067,7 +1068,6 @@ correlations_quantiles <- correlations_long %>%
             mean = mean(value),
             p97.5 = quantile(value, prob=0.975)) %>%
   ungroup()
-head(correlations_quantiles)
 
 high_conf_idx <- which(sign(correlations_quantiles$p2.5) == sign(correlations_quantiles$p97.5))
 
@@ -1100,257 +1100,208 @@ get_ITS_label <- function(idx) {
   return(label)
 }
 
-do_plot <- TRUE
+correlation_threshold <- 0.4
+
+# input is a data.frame in the format
+#
+#     taxon sample resample     value
+# 2       2      1        1 -4.180696
+# 24      2      2        1 -4.293836
+# 46      2      3        1 -5.359160
+# 68      2      4        1 -4.601737
+# 90      2      5        1 -7.509395
+# 112     2      6        1 -5.492191
+#
+# 'sample' indexes the experimental sample
+# 'resample' indexes the posterior sample
+get_quantiles <- function(df) {
+  out_df <- df %>%
+    group_by(sample) %>%
+    summarise(p2.5 = quantile(value, prob=0.025),
+              p25 = quantile(value, prob=0.25),
+              mean = mean(value),
+              p75 = quantile(value, prob=0.75),
+              p97.5 = quantile(value, prob=0.975)) %>%
+    ungroup()
+  return(out_df)  
+}
+
+get_ribbon_plot <- function(data_points, prediction_quantiles, title = NULL) {
+  p <- ggplot() +
+    geom_ribbon(data=prediction_quantiles, aes(x=sample, ymin=p2.5, ymax=p97.5), fill="darkgrey", alpha=0.5) +
+    geom_ribbon(data=prediction_quantiles, aes(x=sample, ymin=p25, ymax=p75), fill="darkgrey", alpha=0.9) +
+    geom_line(data=prediction_quantiles, aes(x=sample, y=mean), color="blue") +
+    xlab("day") +
+    ylab(paste0("CLR(abundance)")) +
+    geom_point(data=data_points, aes(x=sample, y=value)) +
+    theme_minimal()
+  if(!is.null(title)) {
+    p <- p + ggtitle(title)
+  }
+  return(p)
+}
+
+get_info_pair <- function(tax1.idx, tax2.idx, evaluate_type) {
+  # get taxonomic indices, types, and labels appropriate to the analysis run (16S, ITS, or both)
+  tax1.idx.offset <- tax1.idx
+  tax2.idx.offset <- tax2.idx
+  tax1.type <- evaluate_type
+  tax2.type <- evaluate_type
+  if(evaluate_type == "16S") {
+    tax1.label <- get_16S_label(tax1.idx)
+    tax2.label <- get_16S_label(tax2.idx)
+  }
+  if(evaluate_type == "ITS") {
+    tax1.label <- get_ITS_label(tax1.idx)
+    tax2.label <- get_ITS_label(tax2.idx)
+  }
+  if(evaluate_type == "both") {
+    if(tax1.idx > D.16S) {
+      tax1.idx <- tax1.idx - D.16S
+      tax1.type <- "ITS"
+      tax1.label <- get_ITS_label(tax1.idx)
+    } else {
+      tax1.type <- "16S"
+      tax1.label <- get_16S_label(tax1.idx)
+    }
+    if(tax2.idx > D.16S) {
+      tax2.idx <- tax2.idx - D.16S
+      tax2.type <- "ITS"
+      tax2.label <- get_ITS_label(tax2.idx)
+    } else {
+      tax2.type <- "16S"
+      tax2.label <- get_16S_label(tax2.idx)
+    }
+  }
+  return(list(tax1.idx = tax1.idx,
+              tax1.label = tax1.label,
+              tax1.type = tax1.type,
+              tax2.idx = tax2.idx,
+              tax2.label = tax2.label,
+              tax2.type = tax2.type))
+}
+
+# get ribbon plots for a pair of taxa (specified by row indices of correlations_quantiles)
+# for a given animal (random if not specified) in a given year
+get_fit_plots <- function(tax1.idx, tax2.idx, evaluate_type, year, focal_animal = NULL) {
+  # get taxonomic indices, types, and labels appropriate to the analysis run (16S, ITS, or both)
+  info <- get_info_pair(tax1.idx, tax2.idx, evaluate_type)
+  tax1.idx <- tax1.idx
+  tax1.label <- tax1.label
+  tax1.type <- tax1.type
+  tax2.idx <- tax2.idx
+  tax2.label <- tax2.label
+  tax2.type <- tax2.type
+
+  if(year == 1) {
+    animals_in_year <- length(unique(animals.y1))
+  } else {
+    animals_in_year <- length(unique(animals.y2))
+  }
+  
+  if(is.null(focal_animal)) {
+    focal_animal <- sample(1:animals_in_year)[1]
+  } else {
+    if(focal_animal > animals_in_year) {
+      stop("Animal index not in year!\n")
+    }
+  }
+
+  # get sample indices appropriate for the specified year
+  if(year == 1) {
+    focal_animal_name <- as.character(unique(animals.y1)[focal_animal])
+    focal_samples <- idx.animals.y1[[focal_animal]]
+    day_idx <- days.y1
+    animal_sample_assignment <- ids.y1
+  } else {
+    focal_animal_name <- as.character(unique(animals.y2)[focal_animal])
+    focal_samples <- idx.animals.y2[[focal_animal]]
+    day_idx <- days.y2
+    animal_sample_assignment <- ids.y2
+  }
+
+  # get near "truth" for taxon 1, year whatever
+  ground.eta <- gather_array(eta[,focal_samples], value, "taxon", "sample")
+  ground.eta.tax1 <- ground.eta[ground.eta$taxon == tax1.idx.offset,]
+  ground.eta.tax1$sample <- plyr::mapvalues(ground.eta.tax1$sample, 
+                                               from=ground.eta.tax1$sample, 
+                                               to=day_idx[focal_samples])
+  # get near "truth" for taxon 2, year whatever
+  ground.eta.tax2 <- ground.eta[ground.eta$taxon == tax2.idx.offset,]
+  ground.eta.tax2$sample <- plyr::mapvalues(ground.eta.tax2$sample, 
+                                               from=ground.eta.tax2$sample, 
+                                               to=day_idx[focal_samples])
+  # get predictions for taxon 1, year whatever
+  predicted.eta <- gather_array(predictions[,which(animal_sample_assignment == focal_animal),], "value", "taxon", "sample", "resample")
+  predicted.eta.tax1 <- predicted.eta[predicted.eta$taxon == tax1.idx.offset,]
+  predicted.eta.tax1$sample <- plyr::mapvalues(predicted.eta.tax1$sample, 
+                                                  from=min(predicted.eta.tax1$sample):max(predicted.eta.tax1$sample), 
+                                                  to=min(day_idx[focal_samples]):max(day_idx[focal_samples]))
+  # get predictions for taxon 2, year whatever
+  predicted.eta.tax2 <- predicted.eta[predicted.eta$taxon == tax2.idx.offset,]
+  predicted.eta.tax2$sample <- plyr::mapvalues(predicted.eta.tax2$sample, 
+                                                  from=min(predicted.eta.tax2$sample):max(predicted.eta.tax2$sample), 
+                                                  to=min(day_idx[focal_samples]):max(day_idx[focal_samples]))
+  
+  eta.tax1.quantiles <- get_quantiles(predicted.eta.tax1)
+  eta.tax2.quantiles <- get_quantiles(predicted.eta.tax2)
+  
+  ret_list <- list(tax1.plot = get_ribbon_plot(ground.eta.tax1, eta.tax1.quantiles),
+                    tax1.label = tax1.label,
+                    tax1.type = tax1.type,
+                    tax2.plot = get_ribbon_plot(ground.eta.tax2, eta.tax2.quantiles),
+                    tax2.label = tax2.label,
+                    tax2.type = tax2.type,
+                    animal = focal_animal_name)
+  return(ret_list)
+}
+
+# get_fit_plots(tax1.idx = 1, tax2.idx = 2, evaluate_type = evaluate, year = 1, focal_animal = NULL)
+
+do_plot <- FALSE
 fileout <- paste0("correlations_",evaluate,"_",treatment,".txt")
 unlink(fileout)
 
-correlation_threshold <- 0.4
-
 # output these by name
 for(hcf in high_conf_idx) {
-  #if(evaluate == "16S" | evaluate == "ITS") {
-  #  tax1.idx <- correlations_quantiles[hcf,]$taxon1
-  #  tax2.idx <- correlations_quantiles[hcf,]$taxon2
-  #  if(evaluate == "16S") {
-  #    tax1.label <- get_16S_label(tax1.idx)
-  #    tax2.label <- get_16S_label(tax2.idx)
-  #  } else {
-  #    tax1.label <- get_ITS_label(tax1.idx)
-  #    tax2.label <- get_ITS_label(tax2.idx)
-  #  }
-  #  corr.value <- correlations_quantiles[hcf,]$mean
-  #  if(abs(corr.value) > correlation_threshold) {
-  #    # write to stdout
-  #    cat("Labels:",hcf,",",tax1.label,",",tax2.label,", corr=",corr.value,"\n")
-  #    # write to file
-  #    write(paste0(tax1.label,"\t",tax2.label,"\t",round(corr.value,3)), file=fileout, append=TRUE)
-  #  }
-  #} else {
-    # evaluate both
+  corr.value <- correlations_quantiles[hcf,]$mean
+  if(abs(corr.value) > correlation_threshold) {
     tax1.idx <- correlations_quantiles[hcf,]$taxon1
     tax2.idx <- correlations_quantiles[hcf,]$taxon2
-    tax1.idx.offset <- tax1.idx
-    tax2.idx.offset <- tax2.idx
-    tax1.type <- evaluate
-    tax2.type <- evaluate
-    if(evaluate == "16S") {
-      tax1.label <- get_16S_label(tax1.idx)
-      tax2.label <- get_16S_label(tax2.idx)
-    }
-    if(evaluate == "ITS") {
-      tax1.label <- get_ITS_label(tax1.idx)
-      tax2.label <- get_ITS_label(tax2.idx)
-    }
-    if(evaluate == "both") {
-      if(tax1.idx > D.16S) {
-        tax1.idx <- tax1.idx - D.16S
-        tax1.type <- "ITS"
-        tax1.label <- get_ITS_label(tax1.idx)
-      } else {
-        tax1.type <- "16S"
-        tax1.label <- get_16S_label(tax1.idx)
-      }
-      if(tax2.idx > D.16S) {
-        tax2.idx <- tax2.idx - D.16S
-        tax2.type <- "ITS"
-        tax2.label <- get_ITS_label(tax2.idx)
-      } else {
-        tax2.type <- "16S"
-        tax2.label <- get_16S_label(tax2.idx)
-      }
+    if(do_plot) {
+      year <- 1
+      result <- get_fit_plots(tax1.idx = tax1.idx, tax2.idx = correlations_quantiles[hcf,]$taxon2,
+                              evaluate_type = evaluate, year = year, focal_animal = NULL)
+      g <- grid.arrange(result$tax1.plot, result$tax2.plot, nrow=2,
+                        top = textGrob(paste0(result$tax1.label," x ",result$tax2.label," in ",result$animal," (year ",year,")")))
+      ggsave(paste0("images/highconf_",evaluate,"_",treatment,"_",tax1.idx,"_",tax2.idx,"_",result$animal,".png"), plot=g, units="in", dpi=150, height=3, width=12)
+    } else {
+      result <- get_info_pair(tax1.idx = tax1.idx, tax2.idx = correlations_quantiles[hcf,]$taxon2, evaluate_type = evaluate)
+      str_out <- paste(result$tax1.idx, result$tax1.type, result$tax1.label, result$tax2.idx, result$tax2.type, result$tax2.label, round(corr.value, 3), sep = "\t")
+      write(str_out, file=fileout, append=TRUE)
     }
     
-    # get mean correlation
-    corr.value <- correlations_quantiles[hcf,]$mean
-    if(abs(corr.value) > correlation_threshold) {
-      # write to stdout
-      cat(paste0("Labels: ",hcf,", ",tax1.label," (",tax1.type,"), ",tax2.label," (",tax2.type,"), corr=",corr.value,"\n"))
-      # write to file
-      write(paste0(tax1.label," (",tax1.type,")\t",tax2.label," (",tax2.type,")\t",round(corr.value,3)), file=fileout, append=TRUE)
-      
-      # sanity check plots
-      # REUSE FROM ABOVE BUT WE'LL FIX THIS LATER
-      
-      # indiv.y1 <- sample(unique(ids.y1))[1]
-      # indiv.y2 <- sample(unique(ids.y2))[1]
-      
-      #if(do_plot & (tax1.type != tax2.type)) {
-      if(do_plot) {
-        # choose a random individual
-        for(indiv.y1 in sample(unique(ids.y1))[1]) {
-          for(indiv.y2 in sample(unique(ids.y2))[1]) {
-            cat("\tPlotting",tax1.type,"coord",tax1.label,"and",tax2.type,"coord",tax2.label,"in",unique.animals.y1[[indiv.y1]],"&",unique.animals.y2[[indiv.y2]],"\n")
-          
-            # get truth for TAX 1, YEAR 1
-            ground.eta.tax1.y1 <- gather_array(eta[,idx.animals.y1[[indiv.y1]]], value, "taxon", "sample")
-            ground.eta.tax1.y1 <- ground.eta.tax1.y1[ground.eta.tax1.y1$taxon == tax1.idx.offset,]
-            ground.eta.tax1.y1$sample <- plyr::mapvalues(ground.eta.tax1.y1$sample, 
-                                                    from=ground.eta.tax1.y1$sample, 
-                                                    to=days.y1[idx.animals.y1[[indiv.y1]]])
-            
-            # get truth for TAX 1, YEAR 2
-            ground.eta.tax1.y2 <- gather_array(eta[,idx.animals.y2[[indiv.y2]]], value, "taxon", "sample")
-            ground.eta.tax1.y2 <- ground.eta.tax1.y2[ground.eta.tax1.y2$taxon == tax1.idx.offset,]
-            ground.eta.tax1.y2$sample <- plyr::mapvalues(ground.eta.tax1.y2$sample, 
-                                                    from=ground.eta.tax1.y2$sample, 
-                                                    to=days.y2[idx.animals.y2[[indiv.y2]]-nsamp.y1]) # map 1 2 3 ... to 4001 4002 4003 ...
-            
-            # get truth for TAX 2, YEAR 1
-            ground.eta.tax2.y1 <- gather_array(eta[,idx.animals.y1[[indiv.y1]]], value, "taxon", "sample")
-            ground.eta.tax2.y1 <- ground.eta.tax2.y1[ground.eta.tax2.y1$taxon == tax2.idx.offset,]
-            ground.eta.tax2.y1$sample <- plyr::mapvalues(ground.eta.tax2.y1$sample, 
-                                                   from=ground.eta.tax2.y1$sample, 
-                                                   to=days.y1[idx.animals.y1[[indiv.y1]]])
-            
-            # get truth for TAX 2, YEAR 2
-            ground.eta.tax2.y2 <- gather_array(eta[,idx.animals.y2[[indiv.y2]]], value, "taxon", "sample")
-            ground.eta.tax2.y2 <- ground.eta.tax2.y2[ground.eta.tax2.y2$taxon == tax2.idx.offset,]
-            ground.eta.tax2.y2$sample <- plyr::mapvalues(ground.eta.tax2.y2$sample, 
-                                                         from=ground.eta.tax2.y2$sample, 
-                                                         to=days.y2[idx.animals.y2[[indiv.y2]]-nsamp.y1]) # map 1 2 3 ... to 4001 4002 4003 ...
-            
-            # get predictions for TAX 1, YEAR 1
-            predicted.eta.tax1.y1 <- gather_array(predictions[,which(ids.y1 == indiv.y1),], "value", "taxon", "sample", "resample")
-            predicted.eta.tax1.y1 <- predicted.eta.tax1.y1[predicted.eta.tax1.y1$taxon == tax1.idx.offset,]
-            predicted.eta.tax1.y1$sample <- plyr::mapvalues(predicted.eta.tax1.y1$sample, 
-                                                       from=min(predicted.eta.tax1.y1$sample):max(predicted.eta.tax1.y1$sample), 
-                                                       to=min(days.y1[idx.animals.y1[[indiv.y1]]]):max(days.y1[idx.animals.y1[[indiv.y1]]]))
-            
-            # get predictions for TAX 1, YEAR 2
-            predicted.eta.tax1.y2 <- gather_array(predictions[,length(ids.y1) + which(ids.y2 == indiv.y2),], "value", "taxon", "sample", "resample")
-            predicted.eta.tax1.y2 <- predicted.eta.tax1.y2[predicted.eta.tax1.y2$taxon == tax1.idx.offset,]
-            predicted.eta.tax1.y2$sample <- plyr::mapvalues(predicted.eta.tax1.y2$sample, 
-                                                       from=min(predicted.eta.tax1.y2$sample):max(predicted.eta.tax1.y2$sample), 
-                                                       to=min(days.y2[idx.animals.y2[[indiv.y2]]-nsamp.y1]):max(days.y2[idx.animals.y2[[indiv.y2]]-nsamp.y1]))
-            
-            # get predictions for TAX 2, YEAR 1
-            predicted.eta.tax2.y1 <- gather_array(predictions[,which(ids.y1 == indiv.y1),], "value", "taxon", "sample", "resample")
-            predicted.eta.tax2.y1 <- predicted.eta.tax2.y1[predicted.eta.tax2.y1$taxon == tax2.idx.offset,]
-            predicted.eta.tax2.y1$sample <- plyr::mapvalues(predicted.eta.tax2.y1$sample, 
-                                                      from=min(predicted.eta.tax2.y1$sample):max(predicted.eta.tax2.y1$sample), 
-                                                      to=min(days.y1[idx.animals.y1[[indiv.y1]]]):max(days.y1[idx.animals.y1[[indiv.y1]]]))
-            
-            # get predictions for TAX 2, YEAR 2
-            predicted.eta.tax2.y2 <- gather_array(predictions[,length(ids.y1) + which(ids.y2 == indiv.y2),], "value", "taxon", "sample", "resample")
-            predicted.eta.tax2.y2 <- predicted.eta.tax2.y2[predicted.eta.tax2.y2$taxon == tax2.idx.offset,]
-            predicted.eta.tax2.y2$sample <- plyr::mapvalues(predicted.eta.tax2.y2$sample, 
-                                                            from=min(predicted.eta.tax2.y2$sample):max(predicted.eta.tax2.y2$sample), 
-                                                            to=min(days.y2[idx.animals.y2[[indiv.y2]]-nsamp.y1]):max(days.y2[idx.animals.y2[[indiv.y2]]-nsamp.y1]))
-            
-            
-            sample_quantiles.tax1.y1 <- predicted.eta.tax1.y1 %>%
-              group_by(sample) %>%
-              summarise(p2.5 = quantile(value, prob=0.025),
-                        p5 = quantile(value, prob=0.05),
-                        p10 = quantile(value, prob=0.1),
-                        p25 = quantile(value, prob=0.25),
-                        p50 = quantile(value, prob=0.5),
-                        mean = mean(value),
-                        p75 = quantile(value, prob=0.75),
-                        p90 = quantile(value, prob=0.9),
-                        p95 = quantile(value, prob=0.95),
-                        p97.5 = quantile(value, prob=0.975)) %>%
-              ungroup()
-        
-            sample_quantiles.tax1.y2 <- predicted.eta.tax1.y2 %>%
-              group_by(sample) %>%
-              summarise(p2.5 = quantile(value, prob=0.025),
-                        p5 = quantile(value, prob=0.05),
-                        p10 = quantile(value, prob=0.1),
-                        p25 = quantile(value, prob=0.25),
-                        p50 = quantile(value, prob=0.5),
-                        mean = mean(value),
-                        p75 = quantile(value, prob=0.75),
-                        p90 = quantile(value, prob=0.9),
-                        p95 = quantile(value, prob=0.95),
-                        p97.5 = quantile(value, prob=0.975)) %>%
-              ungroup()
-            
-            sample_quantiles.tax2.y1 <- predicted.eta.tax2.y1 %>%
-              group_by(sample) %>%
-              summarise(p2.5 = quantile(value, prob=0.025),
-                        p5 = quantile(value, prob=0.05),
-                        p10 = quantile(value, prob=0.1),
-                        p25 = quantile(value, prob=0.25),
-                        p50 = quantile(value, prob=0.5),
-                        mean = mean(value),
-                        p75 = quantile(value, prob=0.75),
-                        p90 = quantile(value, prob=0.9),
-                        p95 = quantile(value, prob=0.95),
-                        p97.5 = quantile(value, prob=0.975)) %>%
-              ungroup()
-            
-            sample_quantiles.tax2.y2 <- predicted.eta.tax2.y2 %>%
-              group_by(sample) %>%
-              summarise(p2.5 = quantile(value, prob=0.025),
-                        p5 = quantile(value, prob=0.05),
-                        p10 = quantile(value, prob=0.1),
-                        p25 = quantile(value, prob=0.25),
-                        p50 = quantile(value, prob=0.5),
-                        mean = mean(value),
-                        p75 = quantile(value, prob=0.75),
-                        p90 = quantile(value, prob=0.9),
-                        p95 = quantile(value, prob=0.95),
-                        p97.5 = quantile(value, prob=0.975)) %>%
-              ungroup()
-            
-            p.t1.y1 <- ggplot() +
-              geom_ribbon(data=sample_quantiles.tax1.y1, aes(x=sample, ymin=p2.5, ymax=p97.5), fill="darkgrey", alpha=0.5) +
-              geom_ribbon(data=sample_quantiles.tax1.y1, aes(x=sample, ymin=p25, ymax=p75), fill="darkgrey", alpha=0.9) +
-              geom_line(data=sample_quantiles.tax1.y1, aes(x=sample, y=mean), color="blue") +
-              xlab("day") +
-              ylab(paste0("CLR(abundance)")) +
-              ggtitle(paste0("Treatment = ",treatment,", Individual = ",unique.animals.y1[[indiv.y1]],", Year = 1, Taxon = ",tax1.label," (",tax1.type,")")) +
-              theme(axis.title=element_text(size=10),
-                    plot.title=element_text(size=10))
-            p.t1.y1 <- p.t1.y1 + 
-              geom_point(data=ground.eta.tax1.y1, aes(x=sample, y=value))
-            
-            p.t2.y1 <- ggplot() +
-              geom_ribbon(data=sample_quantiles.tax2.y1, aes(x=sample, ymin=p2.5, ymax=p97.5), fill="darkgrey", alpha=0.5) +
-              geom_ribbon(data=sample_quantiles.tax2.y1, aes(x=sample, ymin=p25, ymax=p75), fill="darkgrey", alpha=0.9) +
-              geom_line(data=sample_quantiles.tax2.y1, aes(x=sample, y=mean), color="blue") +
-              xlab("day") +
-              ylab(paste0("CLR(abundance)")) +
-              ggtitle(paste0("Treatment = ",treatment,", Individual = ",unique.animals.y1[[indiv.y1]],", Year = 1, Taxon = ",tax2.label," (",tax2.type,")")) +
-              theme(axis.title=element_text(size=10),
-                    plot.title=element_text(size=10))
-            p.t2.y1 <- p.t2.y1 + 
-              geom_point(data=ground.eta.tax2.y1, aes(x=sample, y=value))
-            
-            p.t1.y2 <- ggplot() +
-              geom_ribbon(data=sample_quantiles.tax1.y2, aes(x=sample, ymin=p2.5, ymax=p97.5), fill="darkgrey", alpha=0.5) +
-              geom_ribbon(data=sample_quantiles.tax1.y2, aes(x=sample, ymin=p25, ymax=p75), fill="darkgrey", alpha=0.9) +
-              geom_line(data=sample_quantiles.tax1.y2, aes(x=sample, y=mean), color="blue") +
-              xlab("day") +
-              ylab(paste0("CLR(abundance)")) +
-              ggtitle(paste0("Treatment = ",treatment,", Individual = ",unique.animals.y2[[indiv.y2]],", Year = 2, Taxon = ",tax1.label," (",tax1.type,")")) +
-              theme(axis.title=element_text(size=10),
-                    plot.title=element_text(size=10))
-            p.t1.y2 <- p.t1.y2 + 
-              geom_point(data=ground.eta.tax1.y2, aes(x=sample, y=value))
-            
-            p.t2.y2 <- ggplot() +
-              geom_ribbon(data=sample_quantiles.tax2.y2, aes(x=sample, ymin=p2.5, ymax=p97.5), fill="darkgrey", alpha=0.5) +
-              geom_ribbon(data=sample_quantiles.tax2.y2, aes(x=sample, ymin=p25, ymax=p75), fill="darkgrey", alpha=0.9) +
-              geom_line(data=sample_quantiles.tax2.y2, aes(x=sample, y=mean), color="blue") +
-              xlab("day") +
-              ylab(paste0("CLR(abundance)")) +
-              ggtitle(paste0("Treatment = ",treatment,", Individual = ",unique.animals.y2[[indiv.y2]],", Year = 2, Taxon = ",tax2.label," (",tax2.type,")")) +
-              theme(axis.title=element_text(size=10),
-                    plot.title=element_text(size=10))
-            p.t2.y2 <- p.t2.y2 + 
-              geom_point(data=ground.eta.tax2.y2, aes(x=sample, y=value))
-            
-            g <- grid.arrange(p.t1.y1, p.t1.y2,
-                              p.t2.y1, p.t2.y2, nrow=2)
-            ggsave(paste0("images/",evaluate,"_paired_highconf_",hcf,"_",indiv.y1,"x",indiv.y2,"_",treatment,".png"), plot=g, units="in", dpi=150, height=3, width=12)
-          }
-        }
-      }
-    }
-  #}
+  }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

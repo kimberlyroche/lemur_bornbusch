@@ -101,10 +101,19 @@ item_positions$index <- 1:nrow(item_positions)
 #   PLOT WITH LABELS
 # ============================================================================================================
 
-plot_network <- function(treatment) {
+plot_network <- function(treatment, which_sign = "positive") {
+  if(which_sign == "positive") {
+    path_positions_filtered <- path_positions[as.numeric(path_positions$sign) == 2,]
+    path_positions_filtered <- path_positions_filtered[path_positions_filtered$treatment == treatment,]
+    color <- "#3CB44B"
+  } else {
+    path_positions_filtered <- path_positions[as.numeric(path_positions$sign) == 1,]
+    path_positions_filtered <- path_positions_filtered[path_positions_filtered$treatment == treatment,]
+    color <- "#E6194B"
+  }
   p <- ggplot() +
-    geom_segment(data=path_positions[path_positions$treatment == treatment,], aes(x=x1, y=y1, xend=x2, yend=y2, color=sign, size=weight), alpha=0.66) +
-    scale_color_manual(values=c("#E6194B", "#3CB44B")) +
+    geom_segment(data=path_positions_filtered, aes(x=x1, y=y1, xend=x2, yend=y2, color=sign, size=weight), alpha=0.66) +
+    scale_color_manual(values=color) +
     scale_size_identity() + # use the width specified by `weight`
     geom_point(data=item_positions, aes(x=x, y=y), size=8) +
     theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
@@ -113,8 +122,8 @@ plot_network <- function(treatment) {
     geom_text(data=item_positions, aes(x=x, y=y, label=index), size=4, color="#FFFFFF") +
     xlim(-r*3, r*3) +
     ylim(-r*3, r*3)
-  p
-  ggsave(paste0("images/",evaluate,"_correlation_network_",treatment,".png"), p, units="in", dpi=150, height=10, width=10)
+  # p
+  ggsave(paste0("images/",evaluate,"_correlation_network_",treatment,"_",which_sign,".png"), p, units="in", dpi=150, height=10, width=10)
   
   sink(paste0("images/",treatment,"_network_labels.txt"))
   for(i in 1:nrow(item_positions)) {
@@ -126,9 +135,12 @@ plot_network <- function(treatment) {
   sink()
 }
 
-plot_network("CON")
-plot_network("ABX")
-plot_network("ABXFT")
+plot_network("CON", which_sign = "positive")
+plot_network("CON", which_sign = "negative")
+plot_network("ABX", which_sign = "positive")
+plot_network("ABX", which_sign = "negative")
+plot_network("ABXFT", which_sign = "positive")
+plot_network("ABXFT", which_sign = "negative")
 
 
 
