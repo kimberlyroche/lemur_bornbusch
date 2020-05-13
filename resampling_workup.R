@@ -285,9 +285,31 @@ agglomerate_data <- function(data.y1, data.y2, level="genus", filter_percent=NUL
   tax_pieces <- c(tax_pieces, "experiment")
   min_sample_idx <- min(which(sapply(data.y1$raw_data[1,], is.numeric)))
   max_sample_idx <- max(which(sapply(data.y1$raw_data[1,], is.numeric)))
+
+  # look for zeros to remove from the unresolved taxa (added 5/8/2020)
+  all_zero_taxa.y1 <- apply(as.matrix(get_counts(data.y1$raw_data)), 1, function(x) sum(x) == 0)
+  all_zero_taxa.y2 <- apply(as.matrix(get_counts(data.y2$raw_data)), 1, function(x) sum(x) == 0)
+  all_zero_taxa <- all_zero_taxa.y1 & all_zero_taxa.y2
+  data.y1$raw_data <- data.y1$raw_data[!all_zero_taxa,]
+  data.y2$raw_data <- data.y2$raw_data[!all_zero_taxa,]
+  
+  # filter out taxa that are present < k times in the entire data set
+  # (I'm seeing lots of singletons; arguably we can't measure correlation on these anyway)
+  # exclude k = 5 retains over 99% of total counts
+  vrare_taxa.y1 <- apply(as.matrix(get_counts(data.y1$raw_data)), 1, function(x) {
+    sum(x != 0) < 5
+  })
+  vrare_taxa.y2 <- apply(as.matrix(get_counts(data.y2$raw_data)), 1, function(x) {
+    sum(x != 0) < 5
+  })
+  vrare_taxa <- vrare_taxa.y1 | vrare_taxa.y2
+  data.y1$raw_data <- data.y1$raw_data[!vrare_taxa,]
+  data.y2$raw_data <- data.y2$raw_data[!vrare_taxa,]
+
   # first exclude anything not resolved to this level
   # we'll incorporate these counts into Other later
   unresolved <- is.na(data.y1$raw_data[,c(level)]) | is.na(data.y2$raw_data[,c(level)])
+  
   collapsed_unresolved.y1 <- colSums(data.y1$raw_data[unresolved,min_sample_idx:max_sample_idx])
   resolved.y1 <- data.y1
   resolved.y1$raw_data <- resolved.y1$raw_data[!unresolved,]
@@ -310,18 +332,22 @@ agglomerate_data <- function(data.y1, data.y2, level="genus", filter_percent=NUL
                                      spread(experiment, agg_val))
   bacteria.agg <- cbind(bacteria.agg.y1,
                         bacteria.agg.y2[,(max(which(sapply(bacteria.agg.y2[1,], is.numeric) == FALSE)) + 1):ncol(bacteria.agg.y2)])
-  counts <- get_counts(bacteria.agg)
+  counts <- get_counts(bacteria.agg) # taxa x samples
   level_idx <- length(tax_pieces)-1 # genus=6, species=7, etc.
   # filter on percent abundance if necessary
   # roll unresolved counts into last row ("Other")
   if(is.null(filter_percent)) {
+    # CURRENTLY NOT IN USE; NEEDS TO BE CHECKED
+    # update this to remove all-zero-count taxa
     retain_idx <- 1:nrow(counts)
     retained_tax <- bacteria.agg[retain_idx,1:level_idx]
     bacteria.chopped <- counts[retain_idx,]
     bacteria.chopped <- rbind(bacteria.chopped, c(collapsed_unresolved.y1, collapsed_unresolved.y2))
     retained_tax <- rbind(retained_tax, rep("Other", level_idx))
   } else {
+    # now filter on abundance
     retain_idx <- filter_low_taxa_alt(counts, percent_of_whole=filter_percent)
+    # retained_tax <- bacteria.agg[retain_idx,1:level_idx]
     retained_tax <- bacteria.agg[retain_idx,1:level_idx]
     # collapse "Other"; if there are D taxa, retained tax will be D-1 items long
     #   the last item (or row in the counts table) is the assumed "Other" group
@@ -329,6 +355,99 @@ agglomerate_data <- function(data.y1, data.y2, level="genus", filter_percent=NUL
     bacteria.chopped[nrow(bacteria.chopped)+1,] <- apply(counts[!retain_idx,], 2, sum) +
       c(collapsed_unresolved.y1, collapsed_unresolved.y2)
     retained_tax[nrow(retained_tax)+1,] <- "Other"
+    
+    # what are the things in Other that appear to correlate with Bacteroides
+    if(FALSE) {
+      # get retained stuff
+      tax.chopped <- bacteria.agg[retain_idx,1:level_idx]
+      
+      # get Othered stuff
+      bacteria.unchopped <- counts[!retain_idx,]
+      tax.unchopped <- bacteria.agg[!retain_idx,1:level_idx]
+      
+      # no apparent correlation between individual log abundances
+      pc <- 0.5
+      cor_vec <- c()
+      log.counts <- log(as.matrix(counts) + pc)
+      log.bacteroides <- log.counts[1,]
+      log.other <- log.counts[22:nrow(log.counts),]
+      for(i in 1:nrow(log.other)) {
+        cor_vec <- c(cor_vec, cor(log.bacteroides, log.other[i,]))
+      }
+      plot(density(cor_vec))
+      
+      # plot the general picture of correlators with Bacteroides
+      df <- data.frame(x = 1:length(cor_vec), y = cor_vec)
+      p <- ggplot(df, aes(x = x, y = y)) +
+        geom_point() +
+         xlab("taxon index") +
+         ylab("correlation")
+      p
+      
+      # ...but what about CLR abundances?
+      cor_vec <- c()
+      clr.counts <- t(driver::clr(t(counts) + pc))
+      clr.bacteroides <- clr.counts[1,]
+      clr.other <- clr.counts[22:nrow(clr.counts),]
+      for(i in 1:nrow(clr.other)) {
+        cor_vec <- c(cor_vec, cor(clr.bacteroides, clr.other[i,]))
+      }
+      plot(density(cor_vec))
+      
+      # plot the general picture of correlators with Bacteroides
+      df <- data.frame(x = 1:length(cor_vec), y = cor_vec)
+      p <- ggplot(df, aes(x = x, y = y)) +
+        geom_point() +
+        xlab("taxon index") +
+        ylab("correlation")
+      p
+      
+      # what does collapsing do to the mean?
+      hist(apply(log.counts, 2, mean), breaks = 20)
+      log.counts.collapsed <- log.counts[1:22,]
+      log.counts.collapsed[22,] <- apply(log.counts[22:nrow(log.counts),], 2, sum)
+      hist(apply(log.counts.collapsed, 2, mean), breaks = 20)
+      
+      cor(log.counts.collapsed[1,], log.counts.collapsed[22,])
+      
+      plot(log.counts.collapsed[1,], log.counts.collapsed[22,])
+      
+      plot(apply(log.counts, 2, mean), log.counts.collapsed[1,])
+      
+      plot(apply(log.counts, 2, mean), log.counts.collapsed[22,])
+      
+      
+      # pull out some representative cases
+      strong_correlators <- which(abs(cor_vec) > 0.4)
+      strong_correlators <- strong_correlators[order(strong_correlators, decreasing = TRUE)]
+      
+      #idx <- strong_correlators[1] # positive correlation prototypical case (must remove vrare filtering for these to be valid!)
+      #idx <- strong_correlators[3] # negative correlation prototypical case
+      idx <- strong_correlators[18]
+
+      cor_vec[idx]
+      # raw counts
+      plot(as.matrix(bacteria.chopped[1,]), bacteria.unchopped[idx,])
+      # CLR counts
+      plot(clr.bacteroides, clr.other[,idx])
+      # get the identity
+      tax.unchopped[idx,]
+
+      # plot, labeling for day
+      m1 <- data.y1$metadata
+      m2 <- data.y2$metadata
+      day_labels <- c(m1$Day, m2$Day)
+      bac1 <- clr.bacteroides
+      bac2 <- clr.other[,idx]
+
+      df <- data.frame(clr_bacteroides = bac1, clr_other = bac2, day = as.factor(day_labels))
+      p <- ggplot(df, aes(x = clr_bacteroides, y = clr_other, color = day)) +
+        geom_point(size = 2) +
+        xlab("CLR(Bacteroides)") +
+        ylab("CLR(*)")
+      p
+      
+    }
   }
   list(counts=bacteria.chopped, level=level_idx, tax=retained_tax)
   
@@ -403,7 +522,7 @@ if(evaluate == "16S" | evaluate == "both") {
   year2$metadata <- read_metadata(year=2, which_data="16S")
   
   # agglomerate and filter out by 1% percent abundance
-  filtered.all <- agglomerate_data(year1, year2, level=agg_16S_level, filter_percent=1)
+  filtered.all <- agglomerate_data(year1, year2, level=agg_16S_level, filter_percent=0.01)
   year1$filtered <- cbind(filtered.all$tax, filtered.all$counts[,colnames(filtered.all$counts) %in% year1$metadata$SampleID])
   year2$filtered <- cbind(filtered.all$tax, filtered.all$counts[,colnames(filtered.all$counts) %in% year2$metadata$SampleID])
   
@@ -569,6 +688,16 @@ rm(year2)
 rm(filtered.all)
 rm(exclude_samples)
 
+if(FALSE) {
+  # what's going on with this apparent strong positive correlation between Bacteroides and Other?
+  dat <- all_data$`16S`$year1$filtered
+  bac.idx <- 1
+  other.idx <- nrow(dat)
+  nn <- ncol(dat)
+  cor(unlist(dat[bac.idx,8:nn]), unlist(dat[other.idx,8:nn]))
+  # zero apparent correlation between counts!
+}
+
 # ============================================================================================================
 #   PRELIMINARY LABELS AND STUFF
 # ============================================================================================================
@@ -699,6 +828,20 @@ if(evaluate == "16S" | evaluate == "ITS") {
     }
     eta.resampled[,,j] <- rbind(t(driver::clr(t(resampled_count_proportions[1:D.16S,]))),
                                 t(driver::clr(t(resampled_count_proportions[(D.16S+1):D,]))))
+  }
+}
+
+
+if(FALSE) {
+  # resampling introduces this strong apparent correlation between Bacteroides and Other
+  resample.idx <- sample(1:200)[1:10]
+  for(ri in resample.idx) {
+    dat <- eta.resampled[,,ri]
+    bac.idx <- 1
+    other.idx <- nrow(dat)
+    nn <- ncol(dat)
+    print(cor(unlist(dat[bac.idx,8:nn]), unlist(dat[other.idx,8:nn])))
+    # zero apparent correlation between counts!
   }
 }
 
@@ -1100,8 +1243,6 @@ get_ITS_label <- function(idx) {
   return(label)
 }
 
-correlation_threshold <- 0.4
-
 # input is a data.frame in the format
 #
 #     taxon sample resample     value
@@ -1143,8 +1284,8 @@ get_ribbon_plot <- function(data_points, prediction_quantiles, title = NULL) {
 
 get_info_pair <- function(tax1.idx, tax2.idx, evaluate_type) {
   # get taxonomic indices, types, and labels appropriate to the analysis run (16S, ITS, or both)
-  tax1.idx.offset <- tax1.idx
-  tax2.idx.offset <- tax2.idx
+  # tax1.idx.offset <- tax1.idx
+  # tax2.idx.offset <- tax2.idx
   tax1.type <- evaluate_type
   tax2.type <- evaluate_type
   if(evaluate_type == "16S") {
@@ -1186,12 +1327,10 @@ get_info_pair <- function(tax1.idx, tax2.idx, evaluate_type) {
 get_fit_plots <- function(tax1.idx, tax2.idx, evaluate_type, year, focal_animal = NULL) {
   # get taxonomic indices, types, and labels appropriate to the analysis run (16S, ITS, or both)
   info <- get_info_pair(tax1.idx, tax2.idx, evaluate_type)
-  tax1.idx <- tax1.idx
-  tax1.label <- tax1.label
-  tax1.type <- tax1.type
-  tax2.idx <- tax2.idx
-  tax2.label <- tax2.label
-  tax2.type <- tax2.type
+  tax1.label <- info$tax1.label
+  tax1.type <- info$tax1.type
+  tax2.label <- info$tax2.label
+  tax2.type <- info$tax2.type
 
   if(year == 1) {
     animals_in_year <- length(unique(animals.y1))
@@ -1211,37 +1350,46 @@ get_fit_plots <- function(tax1.idx, tax2.idx, evaluate_type, year, focal_animal 
   if(year == 1) {
     focal_animal_name <- as.character(unique(animals.y1)[focal_animal])
     focal_samples <- idx.animals.y1[[focal_animal]]
+    offset_focal_samples <- focal_samples
     day_idx <- days.y1
     animal_sample_assignment <- ids.y1
+    offset_animal_samples <- which(animal_sample_assignment == focal_animal)
   } else {
     focal_animal_name <- as.character(unique(animals.y2)[focal_animal])
     focal_samples <- idx.animals.y2[[focal_animal]]
+    offset_focal_samples <- focal_samples - nsamp.y1
     day_idx <- days.y2
     animal_sample_assignment <- ids.y2
+    offset_animal_samples <- length(ids.y1) + which(animal_sample_assignment == focal_animal)
   }
-
+  
   # get near "truth" for taxon 1, year whatever
   ground.eta <- gather_array(eta[,focal_samples], value, "taxon", "sample")
-  ground.eta.tax1 <- ground.eta[ground.eta$taxon == tax1.idx.offset,]
+  # ground.eta.tax1 <- ground.eta[ground.eta$taxon == tax1.idx.offset,]
+  ground.eta.tax1 <- ground.eta[ground.eta$taxon == tax1.idx,]
   ground.eta.tax1$sample <- plyr::mapvalues(ground.eta.tax1$sample, 
-                                               from=ground.eta.tax1$sample, 
-                                               to=day_idx[focal_samples])
+                                            from=ground.eta.tax1$sample, 
+                                            to=day_idx[offset_focal_samples])
+  
   # get near "truth" for taxon 2, year whatever
-  ground.eta.tax2 <- ground.eta[ground.eta$taxon == tax2.idx.offset,]
+  # ground.eta.tax2 <- ground.eta[ground.eta$taxon == tax2.idx.offset,]
+  ground.eta.tax2 <- ground.eta[ground.eta$taxon == tax2.idx,]
   ground.eta.tax2$sample <- plyr::mapvalues(ground.eta.tax2$sample, 
                                                from=ground.eta.tax2$sample, 
-                                               to=day_idx[focal_samples])
+                                               to=day_idx[offset_focal_samples])
   # get predictions for taxon 1, year whatever
-  predicted.eta <- gather_array(predictions[,which(animal_sample_assignment == focal_animal),], "value", "taxon", "sample", "resample")
-  predicted.eta.tax1 <- predicted.eta[predicted.eta$taxon == tax1.idx.offset,]
+  predicted.eta <- gather_array(predictions[,offset_animal_samples,], "value", "taxon", "sample", "resample")
+  # predicted.eta.tax1 <- predicted.eta[predicted.eta$taxon == tax1.idx.offset,]
+  predicted.eta.tax1 <- predicted.eta[predicted.eta$taxon == tax1.idx,]
   predicted.eta.tax1$sample <- plyr::mapvalues(predicted.eta.tax1$sample, 
                                                   from=min(predicted.eta.tax1$sample):max(predicted.eta.tax1$sample), 
-                                                  to=min(day_idx[focal_samples]):max(day_idx[focal_samples]))
+                                                  to=(min(day_idx[offset_focal_samples])):(max(day_idx[offset_focal_samples])))
   # get predictions for taxon 2, year whatever
-  predicted.eta.tax2 <- predicted.eta[predicted.eta$taxon == tax2.idx.offset,]
+  # predicted.eta.tax2 <- predicted.eta[predicted.eta$taxon == tax2.idx.offset,]
+  predicted.eta.tax2 <- predicted.eta[predicted.eta$taxon == tax2.idx,]
   predicted.eta.tax2$sample <- plyr::mapvalues(predicted.eta.tax2$sample, 
                                                   from=min(predicted.eta.tax2$sample):max(predicted.eta.tax2$sample), 
-                                                  to=min(day_idx[focal_samples]):max(day_idx[focal_samples]))
+                                                  to=min(day_idx[offset_focal_samples]):max(day_idx[offset_focal_samples]))
   
   eta.tax1.quantiles <- get_quantiles(predicted.eta.tax1)
   eta.tax2.quantiles <- get_quantiles(predicted.eta.tax2)
@@ -1262,6 +1410,8 @@ do_plot <- FALSE
 fileout <- paste0("correlations_",evaluate,"_",treatment,".txt")
 unlink(fileout)
 
+correlation_threshold <- 0.5
+
 # output these by name
 for(hcf in high_conf_idx) {
   corr.value <- correlations_quantiles[hcf,]$mean
@@ -1269,8 +1419,8 @@ for(hcf in high_conf_idx) {
     tax1.idx <- correlations_quantiles[hcf,]$taxon1
     tax2.idx <- correlations_quantiles[hcf,]$taxon2
     if(do_plot) {
-      year <- 1
-      result <- get_fit_plots(tax1.idx = tax1.idx, tax2.idx = correlations_quantiles[hcf,]$taxon2,
+      year <- 2
+      result <- get_fit_plots(tax1.idx = tax1.idx, tax2.idx = tax2.idx,
                               evaluate_type = evaluate, year = year, focal_animal = NULL)
       g <- grid.arrange(result$tax1.plot, result$tax2.plot, nrow=2,
                         top = textGrob(paste0(result$tax1.label," x ",result$tax2.label," in ",result$animal," (year ",year,")")))
@@ -1284,18 +1434,16 @@ for(hcf in high_conf_idx) {
   }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
+if(FALSE) {
+  tax1.idx <- 105
+  tax2.idx <- 72
+  year <- 2
+  result <- get_fit_plots(tax1.idx = tax1.idx, tax2.idx = tax2.idx,
+                          evaluate_type = evaluate, year = year, focal_animal = NULL)
+  g <- grid.arrange(result$tax1.plot, result$tax2.plot, nrow=2,
+                    top = textGrob(paste0(result$tax1.label," x ",result$tax2.label," in ",result$animal," (year ",year,")")))
+  ggsave(paste0("images/highconf_",evaluate,"_",treatment,"_",tax1.idx,"_",tax2.idx,"_",result$animal,".png"), plot=g, units="in", dpi=150, height=3, width=8)
+}
 
 
 

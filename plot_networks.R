@@ -28,7 +28,7 @@ ABXFT <- tryCatch({
 correlators <- cbind(as.data.frame(CON), treatment="CON")
 correlators <- rbind(correlators, cbind(as.data.frame(ABX), treatment="ABX"))
 correlators <- rbind(correlators, cbind(as.data.frame(ABXFT), treatment="ABXFT"))
-colnames(correlators) <- c("taxon1", "taxon2", "value", "treatment")
+colnames(correlators) <- c("taxon1", "taxon1type", "tax1name", "taxon2", "tax2type", "tax2name", "value", "treatment")
 correlators$taxon1 <- as.character(correlators$taxon1)
 correlators$taxon2 <- as.character(correlators$taxon2)
 correlators$treatment <- as.character(correlators$treatment)
@@ -43,7 +43,7 @@ items <- sort(unique(c(correlators$taxon1, correlators$taxon2)))
 
 # item_positions <- data.frame(item=c(), x=c(), y=c())
 n <- length(items)
-r <- 10
+r <- 15
 x_scale <- 0.4
 y_scale <- 0.4
 position_list <- list(x = c(), y = c())
@@ -115,24 +115,33 @@ plot_network <- function(treatment, which_sign = "positive") {
     geom_segment(data=path_positions_filtered, aes(x=x1, y=y1, xend=x2, yend=y2, color=sign, size=weight), alpha=0.66) +
     scale_color_manual(values=color) +
     scale_size_identity() + # use the width specified by `weight`
-    geom_point(data=item_positions, aes(x=x, y=y), size=8) +
+    geom_point(data=item_positions, aes(x=x, y=y), size=5) +
     theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
             panel.background = element_blank()) +
     #geom_text(data=item_positions, aes(x=x_label, y=y_label, label=item), size=4) +
-    geom_text(data=item_positions, aes(x=x, y=y, label=index), size=4, color="#FFFFFF") +
+    geom_text(data=item_positions, aes(x=x, y=y, label=index), size=3, color="#FFFFFF") +
     xlim(-r*3, r*3) +
     ylim(-r*3, r*3)
-  # p
+  p
   ggsave(paste0("images/",evaluate,"_correlation_network_",treatment,"_",which_sign,".png"), p, units="in", dpi=150, height=10, width=10)
   
-  sink(paste0("images/",treatment,"_network_labels.txt"))
-  for(i in 1:nrow(item_positions)) {
-    if(i < 10) {
-      cat(" ")
+  # work through the labels here, which are faulty
+  if(FALSE) {
+    sink(paste0("images/",treatment,"_network_labels.txt"))
+    for(i in 1:nrow(item_positions)) {
+      if(i < 10) {
+        cat(" ")
+      }
+      item <- item_positions$item[i]
+      correlators_subset <- correlators[correlators$treatment == treatment,]
+      label <- correlators_subset[correlators_subset$taxon1 == item,]$tax1name
+      if(is.null(label)) {
+        label <- correlators[correlators$taxon2 == item_positions$item[i],]$tax2name
+      }
+      cat(paste0(i,"  ",as.character(label),"\n"))
     }
-    cat(paste0(i,"  ",item_positions$item[i],"\n"))
+    sink()
   }
-  sink()
 }
 
 plot_network("CON", which_sign = "positive")
