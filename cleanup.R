@@ -4,6 +4,12 @@ library(tidyverse)
 #   DATA PARSING
 # =====================================================================================================
 
+# parse out the taxonomic labels from either 16S or ITS count table
+get_counts <- function(df) {
+  max_tax_id <- max(which(sapply(df[1,], is.numeric) == FALSE))
+  return(df[,(max_tax_id+1):ncol(df)])
+}
+
 get_exclude_sample_list <- function(data_type) {
   if(data_type == "16S") {
     exclude_samples <- list(year1=c("LCAXC1","LCAXC2"),
@@ -174,8 +180,12 @@ read_sequence_counts <- function(data_type = "16S") {
     saveRDS(tax.collapsed.y1, paste0("data/tax_collapsed_y1_",append_str,".rds"))
     saveRDS(tax.collapsed.y2, paste0("data/tax_collapsed_y2_",append_str,".rds"))
   }
-  
-  # "raw" refers to the fact that these counts haven't been filtered
+
+  # print stats  
+  n_taxa <- nrow(tax.collapsed.y1)
+  counts.all <- cbind(get_counts(tax.collapsed.y1), get_counts(tax.collapsed.y2))
+  p_zero <- sum(counts.all == 0)/(nrow(counts.all) * ncol(counts.all))
+  cat(paste0("Agglomerated data has ",n_taxa," taxa and is ",round(p_zero*100),"% zeros!\n"))
   return(list(year1 = tax.collapsed.y1, year2 = tax.collapsed.y2))
 }
 
@@ -220,13 +230,7 @@ get_tax_labels <- function() {
   return(c("kingdom", "phylum", "class", "order", "family", "genus", "species"))
 }
 
-# parse out the taxonomic labels from either 16S or ITS count table
-get_counts <- function(df) {
-  max_tax_id <- max(which(sapply(df[1,], is.numeric) == FALSE))
-  return(df[,(max_tax_id+1):ncol(df)])
-}
-
-agglomerate_data <- function(raw_data, metadata, level = "genus", filter_percent = NULL) {
+filter_data <- function(raw_data, metadata, level = "genus", filter_percent = NULL) {
   # NOTE: things undefined at the specified taxonomic level will be filtered into "Other"
   tax_pieces <- get_tax_labels()
   tax_pieces <- tax_pieces[1:which(tax_pieces == level)]
@@ -239,6 +243,12 @@ agglomerate_data <- function(raw_data, metadata, level = "genus", filter_percent
   raw_data$year1 <- raw_data$year1[!all_zero_taxa,]
   raw_data$year2 <- raw_data$year2[!all_zero_taxa,]
   
+  # print stats
+  n_taxa <- nrow(raw_data$year1)
+  counts.all <- cbind(get_counts(raw_data$year1), get_counts(raw_data$year2))
+  p_zero <- sum(counts.all == 0)/(nrow(counts.all) * ncol(counts.all))
+  cat(paste0("After filtering out all-zero taxa, data has ",n_taxa," taxa and is ",round(p_zero*100),"% zeros!\n"))
+  
   # filter out taxa that are present < k times in the entire data set
   # I'm seeing lots of singletons or near singletons
   # arguably we can't measure correlation on these anyway, so we'll exclude them
@@ -249,7 +259,13 @@ agglomerate_data <- function(raw_data, metadata, level = "genus", filter_percent
   vrare_taxa <- vrare_taxa.y1 | vrare_taxa.y2
   raw_data$year1 <- raw_data$year1[!vrare_taxa,]
   raw_data$year2 <- raw_data$year2[!vrare_taxa,]
-  
+
+  # print stats
+  n_taxa <- nrow(raw_data$year1)
+  counts.all <- cbind(get_counts(raw_data$year1), get_counts(raw_data$year2))
+  p_zero <- sum(counts.all == 0)/(nrow(counts.all) * ncol(counts.all))
+  cat(paste0("After filtering out taxa with very low presence, data has ",n_taxa," taxa and is ",round(p_zero*100),"% zeros!\n"))
+    
   # exclude (into "other") anything not resolved to the desired level
   # we'll incorporate these counts into Other later
   unresolved <- is.na(raw_data$year1[,c(level)]) | is.na(raw_data$year2[,c(level)])
@@ -266,6 +282,12 @@ agglomerate_data <- function(raw_data, metadata, level = "genus", filter_percent
   resolved$year1 <- resolved$year1[!unresolved,]
   resolved$year2 <- resolved$year2[!unresolved,]
   
+  # print stats
+  n_taxa <- nrow(resolved$year1)
+  counts.all <- cbind(get_counts(resolved$year1), get_counts(resolved$year1))
+  p_zero <- sum(counts.all == 0)/(nrow(counts.all) * ncol(counts.all))
+  cat(paste0("After filtering out unresolved taxa, data has ",n_taxa," taxa and is ",round(p_zero*100),"% zeros!\n"))
+  
   agg <- function(data, min_idx, max_idx, tax_pieces) {
     suppressWarnings(as.data.frame(data %>%
                     gather(experiment, value, min_idx:max_idx) %>%
@@ -273,24 +295,28 @@ agglomerate_data <- function(raw_data, metadata, level = "genus", filter_percent
                     summarise(agg_val = sum(value)) %>%
                     spread(experiment, agg_val)))
   }
-  agglomerated <- list(year1 = agg(resolved$year1, min_sample_idx.y1, max_sample_idx.y1, tax_pieces),
+  collected <- list(year1 = agg(resolved$year1, min_sample_idx.y1, max_sample_idx.y1, tax_pieces),
                        year2 = agg(resolved$year2, min_sample_idx.y2, max_sample_idx.y2, tax_pieces))
-
-  all_agglomerated <- cbind(agglomerated$year1, get_counts(agglomerated$year2))
+  all_collected <- cbind(collected$year1, get_counts(collected$year2))
   
   # now, looking across both years, exclude any taxa that are below a minimum total abundance
   # this and the first (near-singleton) filtering were implemented at different stages and should probably
   # be combined at this point
-  counts <- get_counts(all_agglomerated) # data.frame of taxa (rows) x samples (columns)
+  counts <- get_counts(all_collected) # data.frame of taxa (rows) x samples (columns)
   level_idx <- length(tax_pieces) - 1 # translate genus=6, species=7, etc.
   
   filter_rule <- function(df, filter_percent) { (apply(df, 1, sum)/sum(df)) > (filter_percent/100) }
   retain_idx <- filter_rule(counts, filter_percent)
-  retained_tax <- all_agglomerated[retain_idx, 1:level_idx]
+  retained_tax <- all_collected[retain_idx, 1:level_idx]
   # collapse to create "other" category and tack it on as the last row in the data.frame
   all_filtered <- counts[retain_idx,]
   all_filtered[nrow(all_filtered)+1,] <- apply(counts[!retain_idx,], 2, sum) + c(collapsed_unresolved.y1, collapsed_unresolved.y2)
   retained_tax[nrow(retained_tax)+1,] <- "Other"
+  
+  # print stats
+  n_taxa <- nrow(all_filtered)
+  p_zero <- sum(all_filtered == 0)/(nrow(all_filtered) * ncol(all_filtered))
+  cat(paste0("After filtering very low abundance taxa into 'other', data has ",n_taxa," taxa and is ",round(p_zero*100),"% zeros!\n"))
   
   return(list(counts = all_filtered, level = level_idx, tax = retained_tax))
 }
@@ -345,7 +371,7 @@ get_data <- function(data_type = NULL, remove_baseline_samples = TRUE) {
     tax_level <- "genus"
     tax_labels <- get_tax_labels()
     tax_labels <- tax_labels[1:which(tax_labels == tax_level)]
-    filtered_data <- agglomerate_data(raw_data, metadata, level = tax_level, filter_percent = 0.01)
+    filtered_data <- filter_data(raw_data, metadata, level = tax_level, filter_percent = 0.01)
     
     # split the data out into separate years again
     all_data[[data_type]] <- list(tax = filtered_data$tax,
@@ -372,6 +398,52 @@ get_data <- function(data_type = NULL, remove_baseline_samples = TRUE) {
   return(all_data)
 }
 
+# so far treatment is only 
+all_data <- get_data(data_type = "16S")
+
+# plot changes in the mean log abundance over the samples
+# how affected by antibiotic treatment is this in 16S? in ITS?
+df <- NULL
+for(treatment in c("CON", "ABX", "ABXFT")) {
+  for(year in c(1, 2)) {
+    use_samples <- all_data$`16S`[[paste0("year",year)]]$metadata$Treatment == treatment
+    use_md <- all_data$`16S`[[paste0("year",year)]]$metadata[use_samples,c("Description","Day")]
+    use_counts <- all_data$`16S`[[paste0("year",year)]]$filtered[,use_samples]
+    log_counts <- log(use_counts + 0.5)
+    df.temp <- data.frame(logmean = apply(log_counts, 2, mean), treatment = treatment, timepoint = use_md$Day)
+    if(is.null(df)) {
+      df <- df.temp
+    } else {
+      df <- rbind(df, df.temp)
+    }
+  }
+}
+ggplot(df) +
+  geom_point(aes(x = timepoint, y = logmean, color = treatment))
+
+# this is somewhat mitigated by the IQLR but you have to choose very tight quartiles!
+year <- 1
+treatment <- "ABX"
+use_samples <- all_data$`16S`[[paste0("year",year)]]$metadata$Treatment == treatment
+use_md <- all_data$`16S`[[paste0("year",year)]]$metadata[use_samples,c("Description","Day")]
+use_counts <- all_data$`16S`[[paste0("year",year)]]$filtered[,use_samples]
+clr.counts <- t(clr(t(use_counts) + 0.5)) # taxa x samples
+clr.var <- apply(clr.counts, 1, var)
+qs <- quantile(clr.var, probs = c(0.45, 0.55))
+include_taxa <- clr.var > qs[1] & clr.var < qs[2]
+log_counts <- log(use_counts[include_taxa,] + 0.5)
+df <- data.frame(logmean = apply(log_counts, 2, mean), timepoint = use_md$Day)
+ggplot(df) +
+  geom_point(aes(x = timepoint, y = logmean, color = treatment))
+
+
+str(all_data, max.level = 3)
+
+
+# =====================================================================================================
+#   NEXT -- TBD!!!
+# =====================================================================================================
+
 # go through each sample individually and resample counts
 resample_counts <- function(all_data) {
   data_types <- names(all_data)
@@ -382,11 +454,10 @@ resample_counts <- function(all_data) {
     }
   }
   
-  
   if(evaluate == "16S" | evaluate == "ITS") {
     Y <- as.matrix(cbind(counts.y1, counts.y2))
     eta <- t(driver::clr(t(Y) + 0.5)) # we'll use this to calculate overall CLR means
-    # (for now)
+    # (for now)rm(list)
     N <- ncol(Y)
     resample_it <- 200
     eta.resampled <- array(NA, dim=c(D, N, resample_it))
@@ -421,15 +492,6 @@ resample_counts <- function(all_data) {
     }
   }
 }
-
-# so far treatment is only 
-all_data <- get_data(data_type = "16S")
-str(all_data, max.level = 3)
-
-
-
-
-
 
 
 
