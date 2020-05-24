@@ -1,5 +1,6 @@
 library(tidyverse)
-  
+library(driver)
+
 # =====================================================================================================
 #   DATA PARSING
 # =====================================================================================================
@@ -398,100 +399,132 @@ get_data <- function(data_type = NULL, remove_baseline_samples = TRUE) {
   return(all_data)
 }
 
-# so far treatment is only 
-all_data <- get_data(data_type = "16S")
-
-# plot changes in the mean log abundance over the samples
-# how affected by antibiotic treatment is this in 16S? in ITS?
-df <- NULL
-for(treatment in c("CON", "ABX", "ABXFT")) {
-  for(year in c(1, 2)) {
-    use_samples <- all_data$`16S`[[paste0("year",year)]]$metadata$Treatment == treatment
-    use_md <- all_data$`16S`[[paste0("year",year)]]$metadata[use_samples,c("Description","Day")]
-    use_counts <- all_data$`16S`[[paste0("year",year)]]$filtered[,use_samples]
-    log_counts <- log(use_counts + 0.5)
-    df.temp <- data.frame(logmean = apply(log_counts, 2, mean), treatment = treatment, timepoint = use_md$Day)
-    if(is.null(df)) {
-      df <- df.temp
-    } else {
-      df <- rbind(df, df.temp)
+# match samples between 16S, ITS
+match_sample_IDs_across_data_types <- function(all_data) {
+  for(year in c(1,2)) {
+    shared_sample_IDs <- intersect(c(all_data$`16S`$year1$metadata$SampleID), c(all_data$ITS$year1$metadata$SampleID))
+    for(data_type in c("16S", "ITS")) {
+      year_label <- paste0("year",year)
+      all_data[[data_type]][[year_label]]$metadata <- all_data[[data_type]][[year_label]]$metadata[all_data[[data_type]][[year_label]]$metadata$SampleID %in% shared_sample_IDs,]
+      all_data[[data_type]][[year_label]]$filtered <- all_data[[data_type]][[year_label]]$filtered[,colnames(all_data[[data_type]][[year_label]]$filtered) %in% shared_sample_IDs]
     }
   }
+  return(all_data)
 }
-ggplot(df) +
-  geom_point(aes(x = timepoint, y = logmean, color = treatment))
 
-# this is somewhat mitigated by the IQLR but you have to choose very tight quartiles!
-year <- 1
-treatment <- "ABX"
-use_samples <- all_data$`16S`[[paste0("year",year)]]$metadata$Treatment == treatment
-use_md <- all_data$`16S`[[paste0("year",year)]]$metadata[use_samples,c("Description","Day")]
-use_counts <- all_data$`16S`[[paste0("year",year)]]$filtered[,use_samples]
-clr.counts <- t(clr(t(use_counts) + 0.5)) # taxa x samples
-clr.var <- apply(clr.counts, 1, var)
-qs <- quantile(clr.var, probs = c(0.45, 0.55))
-include_taxa <- clr.var > qs[1] & clr.var < qs[2]
-log_counts <- log(use_counts[include_taxa,] + 0.5)
-df <- data.frame(logmean = apply(log_counts, 2, mean), timepoint = use_md$Day)
-ggplot(df) +
-  geom_point(aes(x = timepoint, y = logmean, color = treatment))
+resample_data_type <- function(all_data, data_type, resample_it = 100) {
+  Y <- cbind(all_data[[data_type]]$year1$filtered, all_data[[data_type]]$year2$filtered)
+  clr.resampled <- array(NA, dim=c(nrow(Y), ncol(Y), resample_it)) # CLR taxa, hence D
+  for(i in 1:resample_it) {
+    for(j in 1:ncol(Y)) {
+      augmented_counts <- unlist(Y[,j] + 0.5)
+      clr.resampled[,j,i] <- c(LaplacesDemon::rdirichlet(1, augmented_counts))
+    }
+    clr.resampled[,,i] <- t(driver::clr(t(clr.resampled[,,i])))
+  }
+  return(clr.resampled)
+}
 
-
-str(all_data, max.level = 3)
-
-
-# =====================================================================================================
-#   NEXT -- TBD!!!
-# =====================================================================================================
-
-# go through each sample individually and resample counts
+# perform sample-wise multinomial-Dirichlet resampling as in ALDEx2
+# https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4030730/
 resample_counts <- function(all_data) {
-  data_types <- names(all_data)
-  for(data_type in data_types) {
-    counts <- NULL
-    if(is.null(counts)) {
-      counts <- cbind(all_data[[data_type]]$year1$filtered, all_data[[data_type]]$year2$filtered)
-    }
+  resample_it <- 10
+  clr.resampled.16S <- NULL
+  if("16S" %in% names(all_data)) {
+    clr.resampled.16S <- resample_data_type(all_data, data_type = "16S", resample_it = resample_it)
   }
-  
-  if(evaluate == "16S" | evaluate == "ITS") {
-    Y <- as.matrix(cbind(counts.y1, counts.y2))
-    eta <- t(driver::clr(t(Y) + 0.5)) # we'll use this to calculate overall CLR means
-    # (for now)rm(list)
-    N <- ncol(Y)
-    resample_it <- 200
-    eta.resampled <- array(NA, dim=c(D, N, resample_it))
-    for(j in 1:resample_it) {
-      # sample posterior of a multinomial-Dirichlet
-      resampled_count_proportions <- Y
-      for(samp in 1:ncol(Y)) {
-        alpha.j <- unlist(resampled_count_proportions[,samp] + 0.5)
-        resampled_count_proportions[,samp] <- t(LaplacesDemon::rdirichlet(1, alpha.j))
-      }
-      eta.resampled[,,j] <- t(driver::clr(t(resampled_count_proportions)))
+  clr.resampled.ITS <- NULL
+  if("ITS" %in% names(all_data)) {
+    clr.resampled.ITS <- resample_data_type(all_data, data_type = "ITS", resample_it = resample_it)
+  }
+
+  if(!is.null(clr.resampled.16S) & !is.null(clr.resampled.ITS)) {
+    D.16S <- nrow(clr.resampled.16S) # taxa x samples
+    D.ITS <- nrow(clr.resampled.ITS) # ditto
+    if(ncol(clr.resampled.16S) != ncol(clr.resampled.ITS)) {
+      stop("Resampling: 16S and ITS sample numbers don't match!\n")
     }
-  } else if(evaluate == "both") {
-    Y <- as.matrix(cbind(counts.y1, counts.y2))
-    D <- D.16S + D.ITS
-    eta <- rbind(t(driver::clr(t(Y[1:D.16S,]) + 0.5)),
-                 t(driver::clr(t(Y[(D.16S+1):D,]) + 0.5)))
-    N <- ncol(Y)
-    resample_it <- 200
-    eta.resampled <- array(NA, dim=c(D, N, resample_it))
-    for(j in 1:resample_it) {
-      # sample posterior of a multinomial-Dirichlet
-      resampled_count_proportions <- Y
-      for(samp in 1:ncol(Y)) {
-        alpha.j.16S <- unlist(resampled_count_proportions[1:D.16S,samp] + 0.5)
-        resampled_count_proportions[1:D.16S,samp] <- t(LaplacesDemon::rdirichlet(1, alpha.j.16S))
-        alpha.j.ITS <- unlist(resampled_count_proportions[(D.16S+1):D,samp] + 0.5)
-        resampled_count_proportions[(D.16S+1):D,samp] <- t(LaplacesDemon::rdirichlet(1, alpha.j.ITS))
-      }
-      eta.resampled[,,j] <- rbind(t(driver::clr(t(resampled_count_proportions[1:D.16S,]))),
-                                  t(driver::clr(t(resampled_count_proportions[(D.16S+1):D,]))))
+    clr.resampled <- array(NA, dim = c(D.16S + D.ITS, ncol(clr.resampled.16S), resample_it))
+    for(k in 1:resample_it) {
+      clr.resampled[1:D.16S,,k] <- clr.resampled.16S[,,k]
+      clr.resampled[(D.16S+1):(D.16S+D.ITS),,k] <- clr.resampled.ITS[,,k]
     }
+    return(clr.resampled)
+  } else if(!is.null(clr.resampled.16S)) {
+    return(clr.resampled.16S)
+  } else if(!is.null(clr.resampled.ITS)) {
+    return(clr.resampled.ITS)
+  } else {
+    return(NULL)
   }
 }
+
+# =====================================================================================================
+#   EXPLORATORY
+# =====================================================================================================
+
+# plot the change in (1) the mean log abundance and (2) very strict interquartile mean to get a sense of
+# how large the low-variance cohort is
+explore_mean_stability <- function(data, lower.quantile = 0.25, upper.quantile = 0.75) {
+  # I'm combining years though; I think that's ok, though the days may only roughtly line up
+  df <- NULL
+  for(treatment in c("CON", "ABX", "ABXFT")) {
+    for(year in c(1,2)) {
+      use_samples <- data$`16S`[[paste0("year",year)]]$metadata$Treatment == treatment
+      use_md <- data$`16S`[[paste0("year",year)]]$metadata[use_samples,c("Description","Day")]
+      use_counts <- data$`16S`[[paste0("year",year)]]$filtered[,use_samples]
+      log_counts <- log(use_counts + 0.5)
+      df.temp <- data.frame(logmean = apply(log_counts, 2, mean), treatment = treatment, timepoint = use_md$Day)
+      if(is.null(df)) {
+        df <- df.temp
+      } else {
+        df <- rbind(df, df.temp)
+      }
+    }
+  }
+  p <- ggplot(df) +
+    geom_point(aes(x = timepoint, y = logmean, color = treatment))
+  ggsave("images/change_in_log_mean.png", p, dpi = 100, units = "in", height = 6, width = 10)
+  
+  # this is somewhat mitigated by the IQLR but you have to choose very tight quartiles!
+  df <- NULL
+  for(treatment in c("CON", "ABX", "ABXFT")) {
+    for(year in c(1,2)) {
+      use_samples <- data$`16S`[[paste0("year",year)]]$metadata$Treatment == treatment
+      use_md <- data$`16S`[[paste0("year",year)]]$metadata[use_samples,c("Description","Day")]
+      use_counts <- data$`16S`[[paste0("year",year)]]$filtered[,use_samples]
+      # evaluate the CLR variance (variance relative to the mean for each taxon)
+      clr.counts <- t(clr(t(use_counts) + 0.5)) # taxa x samples
+      clr.var <- apply(clr.counts, 1, var)
+      # chose the most typical
+      qs <- quantile(clr.var, probs = c(lower.quantile, upper.quantile))
+      include_taxa <- clr.var > qs[1] & clr.var < qs[2]
+      log_counts <- log(use_counts[include_taxa,] + 0.5)
+      df.temp <- data.frame(logmean = apply(log_counts, 2, mean), treatment = treatment, timepoint = use_md$Day)
+      if(is.null(df)) {
+        df <- df.temp
+      } else {
+        df <- rbind(df, df.temp)
+      }
+    }
+  }
+  p <- ggplot(df) +
+    geom_point(aes(x = timepoint, y = logmean, color = treatment))
+  ggsave("images/change_in_IQL_mean.png", p, dpi = 100, units = "in", height = 6, width = 10)
+}
+
+# =====================================================================================================
+#   MAIN LOGIC WORKFLOW
+# =====================================================================================================
+
+all_data <- get_data(data_type = NULL)
+all_data <- match_sample_IDs_across_data_types(all_data)
+# str(all_data, max.level = 3)
+
+# explore_mean_stability(all_data, lower.quantile = 0.4, upper.quantile = 0.6)
+
+test_resample <- resample_counts(all_data)
+str(test_resample)
 
 
 
