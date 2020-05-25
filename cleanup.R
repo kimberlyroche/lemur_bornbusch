@@ -1,5 +1,66 @@
+rm(list = ls())
+
 library(tidyverse)
 library(driver)
+library(stray)
+library(Rcpp)
+
+# uncollapsing/posterior sampling of Lambda, Sigma; lifted directly from stray::basset implementations
+sourceCpp("sampling.cpp")
+
+# =====================================================================================================
+#   EXPLORATORY FNS.
+# =====================================================================================================
+
+# plot the change in (1) the mean log abundance and (2) very strict interquartile mean to get a sense of
+# how large the low-variance cohort is
+explore_mean_stability <- function(data, lower.quantile = 0.25, upper.quantile = 0.75) {
+  # I'm combining years though; I think that's ok, though the days may only roughtly line up
+  df <- NULL
+  for(treatment in c("CON", "ABX", "ABXFT")) {
+    for(year in c(1,2)) {
+      use_samples <- data$`16S`[[paste0("year",year)]]$metadata$Treatment == treatment
+      use_md <- data$`16S`[[paste0("year",year)]]$metadata[use_samples,c("Description","Day")]
+      use_counts <- data$`16S`[[paste0("year",year)]]$filtered[,use_samples]
+      log_counts <- log(use_counts + 0.5)
+      df.temp <- data.frame(logmean = apply(log_counts, 2, mean), treatment = treatment, timepoint = use_md$Day)
+      if(is.null(df)) {
+        df <- df.temp
+      } else {
+        df <- rbind(df, df.temp)
+      }
+    }
+  }
+  p <- ggplot(df) +
+    geom_point(aes(x = timepoint, y = logmean, color = treatment))
+  ggsave("images/change_in_log_mean.png", p, dpi = 100, units = "in", height = 6, width = 10)
+  
+  # this is somewhat mitigated by the IQLR but you have to choose very tight quartiles!
+  df <- NULL
+  for(treatment in c("CON", "ABX", "ABXFT")) {
+    for(year in c(1,2)) {
+      use_samples <- data$`16S`[[paste0("year",year)]]$metadata$Treatment == treatment
+      use_md <- data$`16S`[[paste0("year",year)]]$metadata[use_samples,c("Description","Day")]
+      use_counts <- data$`16S`[[paste0("year",year)]]$filtered[,use_samples]
+      # evaluate the CLR variance (variance relative to the mean for each taxon)
+      clr.counts <- t(clr(t(use_counts) + 0.5)) # taxa x samples
+      clr.var <- apply(clr.counts, 1, var)
+      # chose the most typical
+      qs <- quantile(clr.var, probs = c(lower.quantile, upper.quantile))
+      include_taxa <- clr.var > qs[1] & clr.var < qs[2]
+      log_counts <- log(use_counts[include_taxa,] + 0.5)
+      df.temp <- data.frame(logmean = apply(log_counts, 2, mean), treatment = treatment, timepoint = use_md$Day)
+      if(is.null(df)) {
+        df <- df.temp
+      } else {
+        df <- rbind(df, df.temp)
+      }
+    }
+  }
+  p <- ggplot(df) +
+    geom_point(aes(x = timepoint, y = logmean, color = treatment))
+  ggsave("images/change_in_IQL_mean.png", p, dpi = 100, units = "in", height = 6, width = 10)
+}
 
 # =====================================================================================================
 #   DATA PARSING
@@ -198,26 +259,44 @@ read_metadata <- function(data_type = "16S") {
   for(year in c(1, 2)) {
     year_label <- paste0("Y",year)
     if(data_type == "16S") {
-      metadata.y <- read.csv(paste0("data/16S_",year_label,"_fecal_metadata.txt"), header=TRUE, sep='\t')
+      metadata.y <- read.csv(paste0("data/16S_",year_label,"_fecal_metadata.txt"), header=TRUE, sep='\t', stringsAsFactors = FALSE)
     } else {
-      metadata.y <- read.csv(paste0("data/ITS_",year_label,"_fecal_metadata.txt"), header=TRUE, sep='\t')
+      metadata.y <- read.csv(paste0("data/ITS_",year_label,"_fecal_metadata.txt"), header=TRUE, sep='\t', stringsAsFactors = FALSE)
     }
     
     metadata.y$SampleID <- as.character(metadata.y$SampleID)
     metadata.y <- metadata.y[!(metadata.y$SampleID %in% exclude_samples[[paste0("year",year)]]),]
 
+    # render periods as "Pre", "During", "Post"
+    metadata.y$Period <- as.character(metadata.y$Period)
+    metadata.y$Period <- unname(sapply(metadata.y$Period, function(x) {
+      str_replace(x, "\\d+", "")
+    }))
+    
+    # alter year labels: "Y1" -> 1, "Y2" -> 2
+    metadata.y$Year <- unname(sapply(metadata.y$Year, function(x) {
+      str_replace(x, "Y", "")
+    }))
+    metadata.y$Year <- as.numeric(metadata.y$Year)
+    
     # standardize names
     metadata.y$Animal <- as.character(metadata.y$Animal)
     metadata.y$Animal <- sapply(metadata.y$Animal, function(x) sub(".*Nikos.*", "Nikos", x, perl=TRUE))
     metadata.y$Animal <- sapply(metadata.y$Animal, function(x) sub(".*Jones.*", "Jones", x, perl=TRUE))
-    metadata.y$Animal <- as.factor(metadata.y$Animal)
+    # metadata.y$Animal <- as.factor(metadata.y$Animal)
     # Nikos received antibiotics, move him from "CON" to "ABX" treatment groups
     # this is indicated in Experimental_Groups.xlsx
-    metadata.y[metadata.y$Animal == "Nikos",]$Treatment <- "ABX"
+    # metadata.y[metadata.y$Animal == "Nikos",]$Treatment <- "ABX"
     # fix this awful space that prevents string matching
-    new_levels <- levels(metadata.y$Animal)
-    new_levels[which(new_levels == "Randy ")] <- "Randy"
-    levels(metadata.y$Animal) <- new_levels
+    # new_levels <- levels(metadata.y$Animal)
+    # new_levels[which(new_levels == "Randy ")] <- "Randy"
+    # levels(metadata.y$Animal) <- new_levels
+    
+    # fix Randy_
+    metadata.y$Animal <- unname(sapply(metadata.y$Animal, function(x) {
+      str_replace(x, "Randy ", "Randy")
+    }))
+    
     metadata[[paste0("year",year)]] <- metadata.y
   }
   return(metadata)
@@ -402,7 +481,8 @@ get_data <- function(data_type = NULL, remove_baseline_samples = TRUE) {
 # match samples between 16S, ITS
 match_sample_IDs_across_data_types <- function(all_data) {
   for(year in c(1,2)) {
-    shared_sample_IDs <- intersect(c(all_data$`16S`$year1$metadata$SampleID), c(all_data$ITS$year1$metadata$SampleID))
+    year_label <- paste0("year",year)
+    shared_sample_IDs <- intersect(c(all_data$`16S`[[year_label]]$metadata$SampleID), c(all_data$ITS[[year_label]]$metadata$SampleID))
     for(data_type in c("16S", "ITS")) {
       year_label <- paste0("year",year)
       all_data[[data_type]][[year_label]]$metadata <- all_data[[data_type]][[year_label]]$metadata[all_data[[data_type]][[year_label]]$metadata$SampleID %in% shared_sample_IDs,]
@@ -412,119 +492,236 @@ match_sample_IDs_across_data_types <- function(all_data) {
   return(all_data)
 }
 
-resample_data_type <- function(all_data, data_type, resample_it = 100) {
-  Y <- cbind(all_data[[data_type]]$year1$filtered, all_data[[data_type]]$year2$filtered)
-  clr.resampled <- array(NA, dim=c(nrow(Y), ncol(Y), resample_it)) # CLR taxa, hence D
-  for(i in 1:resample_it) {
-    for(j in 1:ncol(Y)) {
-      augmented_counts <- unlist(Y[,j] + 0.5)
-      clr.resampled[,j,i] <- c(LaplacesDemon::rdirichlet(1, augmented_counts))
+# subsets the data (across years) given a list of sample IDs
+subselect_from_sampleIDs <- function(data, target_sampleIDs) {
+  for(year_label in c("year1","year2")) {
+    for(data_type in names(data)) {
+      data[[data_type]][[year_label]]$filtered <- data[[data_type]][[year_label]]$filtered[,target_sampleIDs[[year_label]]]
+      data[[data_type]][[year_label]]$metadata <- suppressMessages(left_join(data.frame(SampleID = target_sampleIDs[[year_label]], stringsAsFactors = FALSE),
+                                                                             data[[data_type]][[year_label]]$metadata))
     }
-    clr.resampled[,,i] <- t(driver::clr(t(clr.resampled[,,i])))
   }
+  return(data)
+}
+
+# pulls metadata for a given label_type across years
+# year : 1 or 2
+get_label_type <- function(all_data, label_type, year = NULL) {
+  arb_data_type <- names(all_data)[[1]]
+  if(!is.null(year)) {
+    labels <- all_data[[arb_data_type]][[paste0("year", year)]]$metadata[[label_type]]
+  } else {
+    # grab both years
+    labels <- c()
+    for(year in c(1,2)) {
+      year_label <- paste0("year", year)
+      labels <- c(labels, all_data[[arb_data_type]][[year_label]]$metadata[[label_type]])
+    }
+  }
+  return(labels)
+}
+
+# given an individual animal, year, and reference animal ordering, calculates the X values
+# for that animals observation days, e.g.
+# animal "A" observed at 1, 3, 7, 8 will return bumped_X = 1, 3, 7, 8 and
+#                                               predicted bumped_X = 1:8
+# animal "B" observed at 1, 2, 5, 7 will return X = 1001, 1002, 1005, 1007
+#                                               predicted bumped_X = 1001:1007
+# X and bumped_X effectively serve as a mapping from Days in the metadata for a given
+# individual to observed days as the appear in the design matrix
+map_index <- function(data, animal, year, animal_order, bump = 1000, predict = FALSE) {
+  day_labels <- get_label_type(data, "Day", year = year)
+  animal_labels <- get_label_type(data, "Animal", year = year)
+  animal_idx <- which(animal_order == animal)
+  if(predict) {
+    # interpolate spacing
+    base_X <- min(day_labels[animal_labels == animal]):max(day_labels[animal_labels == animal])
+  } else {
+    # leave spaces
+    base_X <- day_labels[animal_labels == animal]
+  }
+  year_offset <- 0
+  if(year == 2) {
+    # get year bump/offset; this is almost exact
+    year_offset <- length(unique(get_label_type(data, "Animal", year = 1)))*bump
+  }
+  bumped_X <- base_X + bump*(animal_idx - 1) + year_offset
+  return(list(X = base_X, bumped_X = bumped_X))
+}
+
+# reorder such that individual animal's observations are in blocks; this format is just
+# easier to deal with down the road
+reorder_samples <- function(data) {
+  sample_IDs <- list()
+  for(year in c(1,2)) {
+    arb_data_type <- names(data)[[1]]
+    day_labels <- get_label_type(data, "Day", year = year)
+    animal_labels <- get_label_type(data, "Animal", year = year)
+    sample_labels <- get_label_type(data, "SampleID", year = year)
+    unique_animals <- unique(animal_labels)
+    year_label <- paste0("year",year)
+    sample_IDs[[year_label]] <- c()
+    for(animal in unique_animals) {
+      samples_for_animal_year <- sample_labels[animal_labels == animal]
+      # there samples are not always in order of time
+      days_for_subset <- unname(sapply(samples_for_animal_year, function(x) {
+        day_labels[sample_labels == x]
+      }))
+      reordering <- order(days_for_subset)
+      sample_IDs[[year_label]] <- c(sample_IDs[[year_label]], samples_for_animal_year)
+    }
+  }
+  data <- subselect_from_sampleIDs(data, sample_IDs)
+  return(data)
+}
+
+pull_treatment_data <- function(data, treatment) {
+  sample_labels <- get_label_type(data, "SampleID")
+  treatment_labels <- get_label_type(data, "Treatment")
+  year_labels <- get_label_type(data, "Year")
+  sample_IDs <- list()
+  sample_IDs[["year1"]] <- sample_labels[treatment_labels == treatment & year_labels == 1]
+  sample_IDs[["year2"]] <- sample_labels[treatment_labels == treatment & year_labels == 2]
+  treatment_data <- subselect_from_sampleIDs(data, sample_IDs)
+}
+
+# note: this returns design matrices of characters; time will need to be converted to numeric later
+build_design_matrix <- function(data, animal_order) {
+  X_time <- c()
+  X_time_predict <- c()
+  X_animal_labels <- c()
+  X_animal_labels_predict <- c()
+  for(year in c(1,2)) {
+    for(animal in animal_order) {
+      if(animal %in% unique(get_label_type(data, "Animal", year = year))) {
+        # if an animal has samples in this treatment condition in this year
+        cat("Adding animal",animal,"in year",year,"\n")
+        X_animal <- map_index(data, animal, year, animal_order, predict = FALSE)$bumped_X
+        X_animal_labels <- c(X_animal_labels, rep(animal, length(X_animal)))
+        X_time <- c(X_time, X_animal)
+        X_animal_predict <- map_index(data, animal, year, animal_order, predict = TRUE)$bumped_X
+        X_animal_labels_predict <- c(X_animal_labels_predict, rep(animal, length(X_animal_predict)))
+        X_time_predict <- c(X_time_predict, X_animal_predict)
+      }    
+    }
+  }
+  X <- rbind(as.numeric(X_time), X_animal_labels)
+  X_predict <- rbind(X_time_predict, X_animal_labels_predict)
+  return(list(X = X, X_predict = X_predict))
+}
+
+# multinomial-Dirichlet resample the count data set
+# called by resample_dataset
+# data set returned are CLR values with dimensions: {taxa (16S or ITS)} x {samples (Y1 + Y2)}
+resample_data_type <- function(data, data_type) {
+  counts <- cbind(data[[data_type]]$year1$filtered, data[[data_type]]$year2$filtered)
+  clr.resampled <- matrix(NA, nrow(counts), ncol(counts))
+  for(j in 1:ncol(counts)) {
+    augmented_counts <- unlist(counts[,j] + 0.5)
+    clr.resampled[,j] <- c(LaplacesDemon::rdirichlet(1, augmented_counts))
+  }
+  clr.resampled <- t(driver::clr(t(clr.resampled)))
   return(clr.resampled)
 }
 
-# perform sample-wise multinomial-Dirichlet resampling as in ALDEx2
-# https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4030730/
-resample_counts <- function(all_data) {
-  resample_it <- 10
-  clr.resampled.16S <- NULL
-  if("16S" %in% names(all_data)) {
-    clr.resampled.16S <- resample_data_type(all_data, data_type = "16S", resample_it = resample_it)
+resample_dataset <- function(data) {
+  clr.resampled <- NULL
+  D.16S <- 0
+  D.ITS <- 0
+  if("16S" %in% names(data)) {
+    clr.resampled <- resample_data_type(data, data_type = "16S")
+    D.16S <- nrow(clr.resampled)
   }
-  clr.resampled.ITS <- NULL
-  if("ITS" %in% names(all_data)) {
-    clr.resampled.ITS <- resample_data_type(all_data, data_type = "ITS", resample_it = resample_it)
-  }
-
-  if(!is.null(clr.resampled.16S) & !is.null(clr.resampled.ITS)) {
-    D.16S <- nrow(clr.resampled.16S) # taxa x samples
-    D.ITS <- nrow(clr.resampled.ITS) # ditto
-    if(ncol(clr.resampled.16S) != ncol(clr.resampled.ITS)) {
-      stop("Resampling: 16S and ITS sample numbers don't match!\n")
+  if("ITS" %in% names(data)) {
+    clr.resampled.ITS <- resample_data_type(data, data_type = "ITS")
+    D.ITS <- nrow(clr.resampled.ITS)
+    if(is.null(clr.resampled)) {
+      clr.resampled <- clr.resampled.ITS
+    } else {
+      clr.resampled <- rbind(clr.resampled, clr.resampled.ITS)
     }
-    clr.resampled <- array(NA, dim = c(D.16S + D.ITS, ncol(clr.resampled.16S), resample_it))
-    for(k in 1:resample_it) {
-      clr.resampled[1:D.16S,,k] <- clr.resampled.16S[,,k]
-      clr.resampled[(D.16S+1):(D.16S+D.ITS),,k] <- clr.resampled.ITS[,,k]
-    }
-    return(clr.resampled)
-  } else if(!is.null(clr.resampled.16S)) {
-    return(clr.resampled.16S)
-  } else if(!is.null(clr.resampled.ITS)) {
-    return(clr.resampled.ITS)
-  } else {
-    return(NULL)
   }
+  return(list(D.16S = D.16S, D.ITS = D.ITS, clr.resampled = clr.resampled))
 }
 
-# =====================================================================================================
-#   EXPLORATORY
-# =====================================================================================================
-
-# plot the change in (1) the mean log abundance and (2) very strict interquartile mean to get a sense of
-# how large the low-variance cohort is
-explore_mean_stability <- function(data, lower.quantile = 0.25, upper.quantile = 0.75) {
-  # I'm combining years though; I think that's ok, though the days may only roughtly line up
-  df <- NULL
-  for(treatment in c("CON", "ABX", "ABXFT")) {
-    for(year in c(1,2)) {
-      use_samples <- data$`16S`[[paste0("year",year)]]$metadata$Treatment == treatment
-      use_md <- data$`16S`[[paste0("year",year)]]$metadata[use_samples,c("Description","Day")]
-      use_counts <- data$`16S`[[paste0("year",year)]]$filtered[,use_samples]
-      log_counts <- log(use_counts + 0.5)
-      df.temp <- data.frame(logmean = apply(log_counts, 2, mean), treatment = treatment, timepoint = use_md$Day)
-      if(is.null(df)) {
-        df <- df.temp
-      } else {
-        df <- rbind(df, df.temp)
-      }
-    }
-  }
-  p <- ggplot(df) +
-    geom_point(aes(x = timepoint, y = logmean, color = treatment))
-  ggsave("images/change_in_log_mean.png", p, dpi = 100, units = "in", height = 6, width = 10)
+fit_model <- function(data, X) {
+  # resample
+  resample_results <- resample_dataset(data)
+  D.16S <- resample_results$D.16S
+  D.ITS <- resample_results$D.ITS
+  clr.resampled <- resample_results$clr.resampled
   
-  # this is somewhat mitigated by the IQLR but you have to choose very tight quartiles!
-  df <- NULL
-  for(treatment in c("CON", "ABX", "ABXFT")) {
-    for(year in c(1,2)) {
-      use_samples <- data$`16S`[[paste0("year",year)]]$metadata$Treatment == treatment
-      use_md <- data$`16S`[[paste0("year",year)]]$metadata[use_samples,c("Description","Day")]
-      use_counts <- data$`16S`[[paste0("year",year)]]$filtered[,use_samples]
-      # evaluate the CLR variance (variance relative to the mean for each taxon)
-      clr.counts <- t(clr(t(use_counts) + 0.5)) # taxa x samples
-      clr.var <- apply(clr.counts, 1, var)
-      # chose the most typical
-      qs <- quantile(clr.var, probs = c(lower.quantile, upper.quantile))
-      include_taxa <- clr.var > qs[1] & clr.var < qs[2]
-      log_counts <- log(use_counts[include_taxa,] + 0.5)
-      df.temp <- data.frame(logmean = apply(log_counts, 2, mean), treatment = treatment, timepoint = use_md$Day)
-      if(is.null(df)) {
-        df <- df.temp
-      } else {
-        df <- rbind(df, df.temp)
-      }
-    }
+  # hyperparameters
+  dc <- 0.01 # desired minimum correlation
+  dd_se <- 7
+  rho_se <- sqrt(-dd_se^2/(2*log(dc))) # back calculate the decay
+  g_sigma <- 1.5
+  
+  upsilon <- (D.16S + D.ITS + 2) + 10 # low certainty
+  Xi <- diag(D.16S + D.ITS)
+  
+  # make and assign baselines
+  clr.baselines <- list() # named list of individual CLR mean abundances
+  for(animal in unique(X[2,])) {
+    replace_idx <- which(X[2,] == animal)
+    clr.baselines[[animal]] <- rowMeans(clr.resampled[,replace_idx])
   }
-  p <- ggplot(df) +
-    geom_point(aes(x = timepoint, y = logmean, color = treatment))
-  ggsave("images/change_in_IQL_mean.png", p, dpi = 100, units = "in", height = 6, width = 10)
+  
+  # clr.baselines must be in the global workspace
+  Theta.train <- function(X) {
+    Theta <- matrix(NA, length(clr.baselines[[1]]), ncol(X))
+    for(j in 1:ncol(X)) {
+      Theta[,j] <- clr.baselines[[X[2,j]]]
+    }
+    return(Theta)
+  }
+  
+  Gamma <- function(X) {
+    X_time <- as.numeric(X[1,])
+    dim(X_time) <- c(1, length(X_time))
+    SE(X_time, sigma=g_sigma, rho=rho_se, jitter=1e-10) # time only
+  }
+  
+  posterior_samples <- uncollapse_simple(clr.resampled,
+                                         diag(ncol(X)), # per fit_basset.R: 53
+                                         Theta.train(X),
+                                         Gamma(X),
+                                         Xi,
+                                         upsilon)
+  
+  return(list(posterior_samples = posterior_samples,
+              clr.baselines = clr.baselines,
+              clr.resampled = clr.resampled,
+              Gamma = Gamma))
+  
 }
 
 # =====================================================================================================
 #   MAIN LOGIC WORKFLOW
 # =====================================================================================================
 
+# NOTES:
+# (1) need to remove Nikos and baseline samples
+# (2) match_sample_IDs_across_data_types should only be called if data_type = NULL
+
 all_data <- get_data(data_type = NULL)
 all_data <- match_sample_IDs_across_data_types(all_data)
-# str(all_data, max.level = 3)
+all_data <- reorder_samples(all_data)
 
-# explore_mean_stability(all_data, lower.quantile = 0.4, upper.quantile = 0.6)
+canonical_animal_order <- unique(get_label_type(all_data, "Animal"))
 
-test_resample <- resample_counts(all_data)
-str(test_resample)
+treatment_data <- pull_treatment_data(all_data, treatment = "CON")
+
+design_matrices <- build_design_matrix(treatment_data, canonical_animal_order)
+X <- design_matrices$X
+X_predict <- design_matrices$X_predict
+
+resampling_iterations <- 1
+
+for(r_it in 1:resampling_iterations) {
+  results <- fit_model(treatment_data, X)
+  image(results$posterior_samples$Sigma[,,1])
+}
 
 
 
