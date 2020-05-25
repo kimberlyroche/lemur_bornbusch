@@ -4,6 +4,7 @@ library(tidyverse)
 library(driver)
 library(stray)
 library(Rcpp)
+library(abind)
 
 # uncollapsing/posterior sampling of Lambda, Sigma; lifted directly from stray::basset implementations
 sourceCpp("sampling.cpp")
@@ -696,6 +697,95 @@ fit_model <- function(data, X) {
   
 }
 
+pull_predictions <- function(X, X_predict, clr.baselines, Lambda, Sigma, Gamma) {
+  n_samples <- 1
+  D <- dim(Sigma)[1]
+  Theta.test <- function(X) {
+    # X is now cbind(X, X_predict)
+    Theta <- matrix(NA, length(clr.baselines[[1]]), ncol(X))
+    for(j in 1:ncol(X)) {
+      Theta[,j] <- clr.baselines[[X[2,j]]]
+    }
+    return(Theta)
+  }
+  nnew <- ncol(X_predict)
+  # Set up Function Evaluation
+  obs <- c(rep(TRUE, ncol(X)), rep(FALSE, nnew)) 
+  Theta_realized <- Theta.test(cbind(X, X_predict))
+  Gamma_realized <- Gamma(cbind(X, X_predict))
+  # Predict Lambda
+  Gamma_oo <- Gamma_realized[obs, obs, drop=F]
+  Gamma_ou <- Gamma_realized[obs, !obs, drop=F]
+  Gamma_uu <- Gamma_realized[!obs, !obs, drop=F]
+  Gamma_ooIou <- solve(Gamma_oo, Gamma_ou)
+  Gamma_schur <- Gamma_uu - t(Gamma_ou) %*% Gamma_ooIou 
+  U_Gamma_schur <- chol(Gamma_schur)
+  Theta_o <- Theta_realized[,obs, drop=F]
+  Theta_u <- Theta_realized[,!obs, drop=F]
+  Lambda_u <- array(0, dim=c(D, nnew, n_samples))
+  # function for prediction - sample one Lambda_u
+  lu <- function(Lambda_o, Sigma){
+    Z <- matrix(rnorm(nrow(Gamma_uu)*D), D, nrow(Gamma_uu))
+    Theta_u + (Lambda_o-Theta_o)%*%Gamma_ooIou + t(chol(Sigma))%*%Z%*%U_Gamma_schur
+  }
+  # Fill in and predict
+  for(i in 1:n_samples) {
+    Lambda_u[,,i] <- lu(Lambda[,,i], Sigma[,,i])
+  }
+  Eta <- array(0, dim=dim(Lambda_u))
+  zEta <- array(rnorm((D)*nnew*n_samples), dim = dim(Eta))
+  for(i in 1:n_samples) {
+    Eta[,,i] <- Lambda_u[,,i] + t(chol(Sigma[,,i]))%*%zEta[,,i]
+  }
+  return(Eta)
+}
+
+# =====================================================================================================
+#   VISUALIZATION
+# =====================================================================================================
+
+# input is a data.frame in the format
+#
+#     taxon sample resample     value
+# 2       2      1        1 -4.180696
+# 24      2      2        1 -4.293836
+# 46      2      3        1 -5.359160
+# 68      2      4        1 -4.601737
+# 90      2      5        1 -7.509395
+# 112     2      6        1 -5.492191
+#
+# 'sample' indexes the experimental sample
+# 'resample' indexes the posterior sample
+get_quantiles <- function(df) {
+  out_df <- df %>%
+    group_by(sample) %>%
+    summarise(p2.5 = quantile(value, prob=0.025),
+              p25 = quantile(value, prob=0.25),
+              mean = mean(value),
+              p75 = quantile(value, prob=0.75),
+              p97.5 = quantile(value, prob=0.975)) %>%
+    ungroup()
+  return(out_df)  
+}
+
+get_ribbon_plot <- function(prediction_quantiles, data_points = NULL, title = NULL) {
+  p <- ggplot() +
+    geom_ribbon(data=prediction_quantiles, aes(x=sample, ymin=p2.5, ymax=p97.5), fill="darkgrey", alpha=0.5) +
+    geom_ribbon(data=prediction_quantiles, aes(x=sample, ymin=p25, ymax=p75), fill="darkgrey", alpha=0.9) +
+    geom_line(data=prediction_quantiles, aes(x=sample, y=mean), color="blue") +
+    xlab("day") +
+    ylab(paste0("CLR(abundance)")) +
+    theme_minimal()
+  if(!is.null(data_points)) {
+    p <- p +
+      geom_point(data=data_points, aes(x=sample, y=value))
+  }
+  if(!is.null(title)) {
+    p <- p + ggtitle(title)
+  }
+  return(p)
+}
+
 # =====================================================================================================
 #   MAIN LOGIC WORKFLOW
 # =====================================================================================================
@@ -716,12 +806,61 @@ design_matrices <- build_design_matrix(treatment_data, canonical_animal_order)
 X <- design_matrices$X
 X_predict <- design_matrices$X_predict
 
-resampling_iterations <- 1
+resampling_iterations <- 100
 
+# right now fit_model and pull_predictions pull one sample each
+all_predictions <- NULL
 for(r_it in 1:resampling_iterations) {
+  cat("Iteration:",r_it,"\n")
+  # results
+  #  |
+  #  --- posterior_samples
+  #  |    |
+  #  |    --- Lambda
+  #  |    |
+  #  |    --- Sigma
+  #  |
+  #  --- clr.baselines
+  #  |
+  #  --- clr.resampled (taxa x treatment-specific samples)
+  #  |
+  #  --- Gamma
   results <- fit_model(treatment_data, X)
-  image(results$posterior_samples$Sigma[,,1])
+  # predictions is (taxa x interpolated samples x 1)
+  predictions <- pull_predictions(X, X_predict, results$clr.baselines,
+                                  results$posterior_samples$Lambda,
+                                  results$posterior_samples$Sigma,
+                                  results$posterior_samples$Gamma)
+  if(is.null(all_predictions)) {
+    all_predictions <- predictions
+  } else {
+    all_predictions <- abind(all_predictions, predictions)
+  }
 }
+
+# still to do:
+# (1) visualization, per individual, per year
+# (2) collecting high-confidence interactions (copy, paste)
+
+
+# testing
+plot_df <- gather_array(all_predictions, "value", "taxon", "sample", "resample")
+prediction_quantiles <- get_quantiles(plot_df[plot_df$taxon == 1,])
+get_ribbon_plot(prediction_quantiles)
+
+plot(all_predictions[1,,1], type="l")
+lines(all_predictions[1,,2], type="l")
+lines(all_predictions[1,,3], type="l")
+
+
+
+
+
+
+
+
+
+
 
 
 
