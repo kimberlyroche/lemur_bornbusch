@@ -498,8 +498,13 @@ subselect_from_sampleIDs <- function(data, target_sampleIDs) {
   for(year_label in c("year1","year2")) {
     for(data_type in names(data)) {
       data[[data_type]][[year_label]]$filtered <- data[[data_type]][[year_label]]$filtered[,target_sampleIDs[[year_label]]]
-      data[[data_type]][[year_label]]$metadata <- suppressMessages(left_join(data.frame(SampleID = target_sampleIDs[[year_label]], stringsAsFactors = FALSE),
-                                                                             data[[data_type]][[year_label]]$metadata))
+      if(ncol(data[[data_type]][[year_label]]$filtered) > 0) {
+        data[[data_type]][[year_label]]$metadata <- suppressMessages(left_join(data.frame(SampleID = target_sampleIDs[[year_label]], stringsAsFactors = FALSE),
+                                                                               data[[data_type]][[year_label]]$metadata))
+      } else {
+        # otherwise, empty selection; no metadata
+        data[[data_type]][[year_label]]$metadata <- NULL
+      }
     }
   }
   return(data)
@@ -592,6 +597,8 @@ build_design_matrix <- function(data, animal_order) {
   X_time_predict <- c()
   X_animal_labels <- c()
   X_animal_labels_predict <- c()
+  X_year <- c()
+  X_year_predict <- c()
   for(year in c(1,2)) {
     for(animal in animal_order) {
       if(animal %in% unique(get_label_type(data, "Animal", year = year))) {
@@ -603,11 +610,13 @@ build_design_matrix <- function(data, animal_order) {
         X_animal_predict <- map_index(data, animal, year, animal_order, predict = TRUE)$bumped_X
         X_animal_labels_predict <- c(X_animal_labels_predict, rep(animal, length(X_animal_predict)))
         X_time_predict <- c(X_time_predict, X_animal_predict)
+        X_year <- c(X_year, rep(year, length(X_animal)))
+        X_year_predict <- c(X_year_predict, rep(year, length(X_animal_predict)))
       }    
     }
   }
-  X <- rbind(as.numeric(X_time), X_animal_labels)
-  X_predict <- rbind(X_time_predict, X_animal_labels_predict)
+  X <- rbind(as.numeric(X_time), X_animal_labels, X_year)
+  X_predict <- rbind(X_time_predict, X_animal_labels_predict, X_year_predict)
   return(list(X = X, X_predict = X_predict))
 }
 
@@ -625,38 +634,55 @@ resample_data_type <- function(data, data_type) {
   return(clr.resampled)
 }
 
-resample_dataset <- function(data) {
-  clr.resampled <- NULL
+get_ntaxa <- function(data) {
   D.16S <- 0
   D.ITS <- 0
   if("16S" %in% names(data)) {
+    if("year1" %in% names(data$`16S`)) {
+      D.16S <- nrow(data$`16S`[["year1"]]$filtered)
+    } else if("year1" %in% names(data$`16S`)) {
+      D.16S <- nrow(data$`16S`[["year2"]]$filtered)
+    }
+  }
+  if("ITS" %in% names(data)) {
+    if("year1" %in% names(data$`16S`)) {
+      D.ITS <- nrow(data$ITS[["year1"]]$filtered)
+    } else if("year1" %in% names(data$`16S`)) {
+      D.ITS <- nrow(data$ITS[["year2"]]$filtered)
+    }
+  }
+  return(list(D.16S = D.16S, D.ITS = D.ITS))
+}
+
+resample_dataset <- function(data) {
+  clr.resampled <- NULL
+  if("16S" %in% names(data)) {
     clr.resampled <- resample_data_type(data, data_type = "16S")
-    D.16S <- nrow(clr.resampled)
   }
   if("ITS" %in% names(data)) {
     clr.resampled.ITS <- resample_data_type(data, data_type = "ITS")
-    D.ITS <- nrow(clr.resampled.ITS)
     if(is.null(clr.resampled)) {
       clr.resampled <- clr.resampled.ITS
     } else {
       clr.resampled <- rbind(clr.resampled, clr.resampled.ITS)
     }
   }
-  return(list(D.16S = D.16S, D.ITS = D.ITS, clr.resampled = clr.resampled))
+  return(list(clr.resampled = clr.resampled))
 }
 
 fit_model <- function(data, X) {
   # resample
+  D.taxa <- get_ntaxa(data)
+  D.16S <- D.taxa$D.16S
+  D.ITS <- D.taxa$D.ITS
   resample_results <- resample_dataset(data)
-  D.16S <- resample_results$D.16S
-  D.ITS <- resample_results$D.ITS
   clr.resampled <- resample_results$clr.resampled
   
   # hyperparameters
   dc <- 0.01 # desired minimum correlation
   dd_se <- 7
-  rho_se <- sqrt(-dd_se^2/(2*log(dc))) # back calculate the decay
-  g_sigma <- 1.5
+  rho_se <<- sqrt(-dd_se^2/(2*log(dc))) # back calculate the decay
+  g_sigma <<- 1.5
   
   upsilon <- (D.16S + D.ITS + 2) + 10 # low certainty
   Xi <- diag(D.16S + D.ITS)
@@ -786,6 +812,44 @@ get_ribbon_plot <- function(prediction_quantiles, data_points = NULL, title = NU
   return(p)
 }
 
+plot_predictive <- function(predictions, data, X_predict, plot_animal, plot_year, plot_taxon) {
+  # get desired (dim 2) indices in the predictions for this animal and year
+  idx_in_predictX <- which(X_predict[2,] == plot_animal & as.numeric(X_predict[3,]) == plot_year)
+  
+  # subset to desired indices and get quantiles
+  subset_predictions <- predictions[,idx_in_predictX,]
+  plot_df <- gather_array(subset_predictions, "value", "taxon", "sample", "resample")
+  prediction_quantiles <- get_quantiles(plot_df[plot_df$taxon == plot_taxon,])
+
+  # (laboriously) get something as near a grouth truth as we can manage
+  # note: this will be more accurate for highly abundant taxa than lowly abundant ones
+  sample_IDs <- get_label_type(data, "SampleID", year = plot_year)
+  animals <- get_label_type(data, "Animal", year = plot_year)
+  days <- get_label_type(data, "Day", year = plot_year)
+  # "near truth" will be the empirical CLR values of these samples
+  neartruth_days <- days[animals == plot_animal]
+  # the 2nd argument to subselect_from_sampleIDs must be a list named by year
+  neartruth_sample_IDs <- list(c(sample_IDs[animals == plot_animal]))
+  names(neartruth_sample_IDs) <- paste0("year",plot_year)
+  neartruth_counts <- subselect_from_sampleIDs(data, neartruth_sample_IDs)
+  
+  # CLR transform and select focal taxon
+  D.taxa <- get_ntaxa(data)
+  year_label <- paste0("year",plot_year)
+  if(plot_taxon <= D.taxa$D.16S) {
+    neartruth_subset <- neartruth_counts$`16S`[[year_label]]$filtered
+  } else if(plot_taxon <= D.taxa$D.16S + D.taxa$D.ITS) {
+    neartruth_subset <- neartruth_counts$ITS[[year_label]]$filtered
+  } else {
+    stop("Can't plot index larger than combined number of bacterial and fungal taxa!\n")
+  }
+  clr.counts <- t(driver::clr(t(neartruth_subset) + 0.5))
+  clr.neartruth <- clr.counts[plot_taxon,] 
+  neartruth_df <- data.frame(sample = neartruth_days, value = clr.neartruth)
+  # plot
+  get_ribbon_plot(prediction_quantiles, data_points = neartruth_df)
+}
+
 # =====================================================================================================
 #   MAIN LOGIC WORKFLOW
 # =====================================================================================================
@@ -827,6 +891,8 @@ for(r_it in 1:resampling_iterations) {
   #  --- Gamma
   results <- fit_model(treatment_data, X)
   # predictions is (taxa x interpolated samples x 1)
+  # awkwardly, fit_model must have been run before this to make sure g_sigma
+  # and rho_se are added to the GLOBAL workspace
   predictions <- pull_predictions(X, X_predict, results$clr.baselines,
                                   results$posterior_samples$Lambda,
                                   results$posterior_samples$Sigma,
@@ -838,19 +904,12 @@ for(r_it in 1:resampling_iterations) {
   }
 }
 
+plot_predictive(all_predictions, treatment_data, X_predict, plot_animal = "Onyx", plot_year = 1, plot_taxon = 3)
+
 # still to do:
-# (1) visualization, per individual, per year
-# (2) collecting high-confidence interactions (copy, paste)
+# (1) collecting high-confidence interactions (copy, paste)
 
-
-# testing
-plot_df <- gather_array(all_predictions, "value", "taxon", "sample", "resample")
-prediction_quantiles <- get_quantiles(plot_df[plot_df$taxon == 1,])
-get_ribbon_plot(prediction_quantiles)
-
-plot(all_predictions[1,,1], type="l")
-lines(all_predictions[1,,2], type="l")
-lines(all_predictions[1,,3], type="l")
+  
 
 
 
