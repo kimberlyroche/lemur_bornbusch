@@ -464,6 +464,7 @@ get_data <- function(data_type = NULL, remove_baseline_samples = TRUE) {
     
     # test this: if in a treatment group, exclude before and after samples to see if signal increases
     if(remove_baseline_samples) {
+      cat("Removing baseline samples...\n")
       tag_baseline <- function(data) {
         include_samples <- !str_detect(data$metadata$Period, "Pre")
         # chop "Pre" samples out of metadata
@@ -476,6 +477,10 @@ get_data <- function(data_type = NULL, remove_baseline_samples = TRUE) {
       all_data[[data_type]]$year2 <- tag_baseline(all_data[[data_type]]$year2)
     }
   }
+  # take intersection of 16S and ITS samples
+  all_data <- match_sample_IDs_across_data_types(all_data)
+  # make sure samples are blocked by individual (this make model fitting and visualization easier)
+  all_data <- reorder_samples(all_data)
   return(all_data)
 }
 
@@ -591,6 +596,10 @@ pull_treatment_data <- function(data, treatment) {
   treatment_data <- subselect_from_sampleIDs(data, sample_IDs)
 }
 
+# =====================================================================================================
+#   MODEL FITTING
+# =====================================================================================================
+
 # note: this returns design matrices of characters; time will need to be converted to numeric later
 build_design_matrix <- function(data, animal_order) {
   X_time <- c()
@@ -670,7 +679,7 @@ resample_dataset <- function(data) {
   return(list(clr.resampled = clr.resampled))
 }
 
-fit_model <- function(data, X) {
+fit_GP <- function(data, X) {
   # resample
   D.taxa <- get_ntaxa(data)
   D.16S <- D.taxa$D.16S
@@ -766,6 +775,93 @@ pull_predictions <- function(X, X_predict, clr.baselines, Lambda, Sigma, Gamma) 
   return(Eta)
 }
 
+
+fit_model <- function(data, animal_order, resample_iterations = 100, get_predictions = FALSE) {
+  design_matrices <- build_design_matrix(data, animal_order)
+  correlations <- NULL
+  predictions <- NULL
+  for(resample_iteration in 1:resample_iterations) {
+    cat("Resample and fit iteration:",resample_iteration,"\n")
+    # fit
+    #  |
+    #  --- posterior_samples
+    #  |    |
+    #  |    --- Lambda
+    #  |    |
+    #  |    --- Sigma
+    #  |
+    #  --- clr.baselines
+    #  |
+    #  --- clr.resampled (taxa x treatment-specific samples)
+    #  |
+    #  --- Gamma
+    fit <- fit_GP(data, design_matrices$X)
+    if(is.null(correlations)) {
+      correlations <- cov2cor(fit$posterior_samples$Sigma[,,1])
+      dim(correlations) <- c(nrow(correlations), ncol(correlations), 1)
+    } else {
+      single_correlation_matrix <- cov2cor(fit$posterior_samples$Sigma[,,1])
+      dim(single_correlation_matrix) <- c(nrow(single_correlation_matrix), ncol(single_correlation_matrix), 1)
+      correlations <- abind(correlations,single_correlation_matrix)
+    }
+    if(get_predictions) {
+      single_prediction <- pull_predictions(design_matrices$X,
+                                            design_matrices$X_predict,
+                                            fit$clr.baselines,
+                                            fit$posterior_samples$Lambda,
+                                            fit$posterior_samples$Sigma,
+                                            fit$Gamma)
+      if(is.null(predictions)) {
+        predictions <- single_prediction
+      } else {
+        predictions <- abind(predictions, single_prediction)
+      }
+    }
+  }
+  return(list(correlations = correlations, predictions = predictions,
+              X = design_matrices$X, X_predict = design_matrices$X_predict))
+}
+
+get_high_conf_associations <- function(data, correlations) {
+  resample_iterations <- dim(correlations)[3]
+  # NA out half the correlation matrix so we can dump it from the data.frame later and have
+  # only unique associations
+  # apply doesn't work here for whatever reason
+  for(resample_iteration in 1:resample_iterations) {
+    temp <- correlations[,,resample_iteration]
+    temp[upper.tri(temp, diag=TRUE)] <- NA
+    correlations[,,resample_iteration] <- temp
+  }
+  correlations_df <- driver::gather_array(correlations, "value", "taxon1", "taxon2", "sample")
+  # remove redundant entries and diagonal (tagged as NA)
+  correlations_df <- correlations_df[complete.cases(correlations_df),]
+  # define 95% posterior inverval value
+  cat("Calculating correlation quantiles for",resample_iterations,"iterations...\n")
+  correlations_quantiles <- correlations_df %>%
+    group_by(taxon1, taxon2) %>%
+    summarise(p2.5 = quantile(value, prob=0.025),
+              mean = mean(value),
+              p97.5 = quantile(value, prob=0.975)) %>%
+    ungroup()
+  head(correlations_quantiles)
+  
+  # "high confidence" indices have a 95% interval that doesn't span zero (i.e. they're consistent with respect to interaction sign)
+  high_conf_idx <- which(sign(correlations_quantiles$p2.5) == sign(correlations_quantiles$p97.5))
+  
+  # should probably just keep this globally available somewhere...
+  D.taxa <- get_ntaxa(data)
+  D.16S <- D.taxa$D.16S
+  D.ITS <- D.taxa$D.ITS
+  
+  high_conf_correlators <- correlations_quantiles[high_conf_idx,]
+  if(D.16S > 0 & D.ITS > 0) {
+    high_conf_correlators <- high_conf_correlators[((high_conf_correlators$taxon1 <= D.16S & high_conf_correlators$taxon2 > D.16S) | (high_conf_correlators$taxon1 > D.16S & high_conf_correlators$taxon2 <= D.16S)),]
+  }
+  cat("Average association strength:",round(mean(abs(high_conf_correlators$mean)),3),"\n")
+  cat("Max association strength:",round(max(abs(high_conf_correlators$mean)),3),"\n")
+  return(high_conf_correlators)
+}
+
 # =====================================================================================================
 #   VISUALIZATION
 # =====================================================================================================
@@ -839,6 +935,7 @@ plot_predictive <- function(predictions, data, X_predict, plot_animal, plot_year
   if(plot_taxon <= D.taxa$D.16S) {
     neartruth_subset <- neartruth_counts$`16S`[[year_label]]$filtered
   } else if(plot_taxon <= D.taxa$D.16S + D.taxa$D.ITS) {
+    plot_taxon <- plot_taxon - D.taxa$D.16S
     neartruth_subset <- neartruth_counts$ITS[[year_label]]$filtered
   } else {
     stop("Can't plot index larger than combined number of bacterial and fungal taxa!\n")
@@ -857,64 +954,45 @@ plot_predictive <- function(predictions, data, X_predict, plot_animal, plot_year
 # NOTES:
 # (1) need to remove Nikos and baseline samples
 # (2) match_sample_IDs_across_data_types should only be called if data_type = NULL
+# (3) right now resampling and prediction are 1-to-1; needs 
+
+# still to do:
+# (1) collecting high-confidence interactions (copy, paste)
+# (2) output to file
+# (3) tie in network plots
+# (4) switch CLR to IQLR
+
+# for Brianna, Zack -- how can we generalize this such that sub-item YEARS don't need to be present?!
+
 
 all_data <- get_data(data_type = NULL)
-all_data <- match_sample_IDs_across_data_types(all_data)
-all_data <- reorder_samples(all_data)
 
+# set an (arbitrary) order for individuals in the combined series
 canonical_animal_order <- unique(get_label_type(all_data, "Animal"))
 
 treatment_data <- pull_treatment_data(all_data, treatment = "CON")
 
-design_matrices <- build_design_matrix(treatment_data, canonical_animal_order)
-X <- design_matrices$X
-X_predict <- design_matrices$X_predict
+model_output <- fit_model(treatment_data, canonical_animal_order, resample_iterations = 50, get_predictions = TRUE)
 
-resampling_iterations <- 100
+# diagnostic
+plot_predictive(model_output$predictions, treatment_data, model_output$X_predict, plot_animal = "Onyx", plot_year = 1, plot_taxon = 3)
 
-# right now fit_model and pull_predictions pull one sample each
-all_predictions <- NULL
-for(r_it in 1:resampling_iterations) {
-  cat("Iteration:",r_it,"\n")
-  # results
-  #  |
-  #  --- posterior_samples
-  #  |    |
-  #  |    --- Lambda
-  #  |    |
-  #  |    --- Sigma
-  #  |
-  #  --- clr.baselines
-  #  |
-  #  --- clr.resampled (taxa x treatment-specific samples)
-  #  |
-  #  --- Gamma
-  results <- fit_model(treatment_data, X)
-  # predictions is (taxa x interpolated samples x 1)
-  # awkwardly, fit_model must have been run before this to make sure g_sigma
-  # and rho_se are added to the GLOBAL workspace
-  predictions <- pull_predictions(X, X_predict, results$clr.baselines,
-                                  results$posterior_samples$Lambda,
-                                  results$posterior_samples$Sigma,
-                                  results$posterior_samples$Gamma)
-  if(is.null(all_predictions)) {
-    all_predictions <- predictions
-  } else {
-    all_predictions <- abind(all_predictions, predictions)
-  }
-}
+high_conf_correlators <- get_high_conf_associations(treatment_data, model_output$correlations)
 
-plot_predictive(all_predictions, treatment_data, X_predict, plot_animal = "Onyx", plot_year = 1, plot_taxon = 3)
+mean_strength_order <- order(high_conf_correlators$mean, decreasing = TRUE)
+top_20_pos <- mean_strength_order[1:10]
+top_20_neg <- mean_strength_order[length(mean_strength_order):(length(mean_strength_order)-9)]
 
-# still to do:
-# (1) collecting high-confidence interactions (copy, paste)
+# visualize a "strong" correlation
+get_label_type(treatment_data, label_type = "Animal", year = 2)
 
-  
-
-
-
-
-
+plot_idx <- 2
+animal <- "Licinius"
+year <- 2
+plot_predictive(model_output$predictions, treatment_data, model_output$X_predict, plot_animal = animal,
+                plot_year = year, plot_taxon = high_conf_correlators$taxon1[top_20_pos[plot_idx]])
+plot_predictive(model_output$predictions, treatment_data, model_output$X_predict, plot_animal = animal,
+                plot_year = year, plot_taxon = high_conf_correlators$taxon2[top_20_pos[plot_idx]])
 
 
 
