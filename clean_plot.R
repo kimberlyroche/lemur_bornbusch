@@ -1,7 +1,5 @@
 library(ggplot2)
 
-rm(list = ls())
-
 plot_network <- function(input_file, which_sign = NULL, show_plot = FALSE) {
 
   # ============================================================================================================
@@ -122,9 +120,9 @@ plot_network <- function(input_file, which_sign = NULL, show_plot = FALSE) {
   ggsave(paste0(which_sign,"_interactions.png"), p, units="in", dpi=100, height=10, width=20)
 }
 
-plot_network("network_input.txt", which_sign = "positive", show_plot = TRUE)
-plot_network("network_input.txt", which_sign = "negative", show_plot = TRUE)
-
+# plot_network("network_input.txt", which_sign = "positive", show_plot = TRUE)
+# plot_network("network_input.txt", which_sign = "negative", show_plot = TRUE)
+plot_network("network_input2.txt", which_sign = NULL, show_plot = TRUE)
 
 
 
