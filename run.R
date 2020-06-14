@@ -5,6 +5,8 @@ library(driver)
 library(stray)
 library(Rcpp)
 library(abind)
+library(grid)
+library(gridExtra)
 
 # uncollapsing/posterior sampling of Lambda, Sigma; lifted directly from stray::basset implementations
 sourceCpp("sampling.cpp")
@@ -34,7 +36,7 @@ explore_mean_stability <- function(data, lower.quantile = 0.25, upper.quantile =
   }
   p <- ggplot(df) +
     geom_point(aes(x = timepoint, y = logmean, color = treatment))
-  ggsave("images/change_in_log_mean.png", p, dpi = 100, units = "in", height = 6, width = 10)
+  ggsave(file.path("output","change_in_log_mean.png"), p, dpi = 100, units = "in", height = 6, width = 10)
   
   # this is somewhat mitigated by the IQLR but you have to choose very tight quartiles!
   df <- NULL
@@ -60,7 +62,7 @@ explore_mean_stability <- function(data, lower.quantile = 0.25, upper.quantile =
   }
   p <- ggplot(df) +
     geom_point(aes(x = timepoint, y = logmean, color = treatment))
-  ggsave("images/change_in_IQL_mean.png", p, dpi = 100, units = "in", height = 6, width = 10)
+  ggsave(file.path("images","change_in_IQL_mean.png"), p, dpi = 100, units = "in", height = 6, width = 10)
 }
 
 # =====================================================================================================
@@ -193,8 +195,7 @@ read_sequence_counts <- function(data_type = "16S") {
     }
     
     tax.df <- cbind(counts.all, data.frame(kingdom=NA, phylum=NA, class=NA, order=NA, family=NA, genus=NA, species=NA))
-    #for(i in 1:length(OTU_list.all)) {
-    for(i in 1:30) {
+    for(i in 1:length(OTU_list.all)) {
       if(i %% 10 == 0) {
         cat("Parsing OTU:",i,"\n")
       }
@@ -223,7 +224,7 @@ read_sequence_counts <- function(data_type = "16S") {
     
     tax.collapsed <- tax.df %>%
       group_by(kingdom, phylum, class, order, family, genus, species, sample) %>%
-      summarise(agg_val = sum(value)) %>%
+      summarise(agg_val = sum(value), .groups = 'keep') %>%
       spread(sample, agg_val)
     
     # omit a few ; this is very few counts (23 / > 100 million)
@@ -373,7 +374,7 @@ filter_data <- function(raw_data, metadata, level = "genus", filter_percent = NU
     suppressWarnings(as.data.frame(data %>%
                     gather(experiment, value, min_idx:max_idx) %>%
                     group_by(!!!syms(tax_pieces)) %>%
-                    summarise(agg_val = sum(value)) %>%
+                    summarise(agg_val = sum(value), .groups = 'keep') %>%
                     spread(experiment, agg_val)))
   }
   collected <- list(year1 = agg(resolved$year1, min_sample_idx.y1, max_sample_idx.y1, tax_pieces),
@@ -462,7 +463,7 @@ get_data <- function(data_type = NULL) {
                                            metadata = metadata$year2))
     # str(all_data, max.level = 3)
     
-    # remove baseline samples from treatment groups so as not to "dilute" signal
+    # added later: remove baseline samples from treatment groups so as not to "dilute" signal
     cat("Removing baseline samples...\n")
     tag_baseline <- function(data) {
       include_samples <- !str_detect(data$metadata$Period, "Pre")
@@ -474,6 +475,18 @@ get_data <- function(data_type = NULL) {
     }
     all_data[[data_type]]$year1 <- tag_baseline(all_data[[data_type]]$year1)
     all_data[[data_type]]$year2 <- tag_baseline(all_data[[data_type]]$year2)
+    # added later: remove Nikos' samples
+    tag_Nikos <- function(data) {
+      include_samples <- !str_detect(data$metadata$Animal, "Nikos")
+      # chop "Pre" samples out of metadata
+      data$metadata <- data$metadata[include_samples,]
+      # used filtered metadata sample IDs/descriptions
+      data$filtered <- data$filtered[,colnames(data$filtered) %in% c(tax_labels, as.character(data$metadata$Description))]
+      return(data)
+    }
+    all_data[[data_type]]$year1 <- tag_Nikos(all_data[[data_type]]$year1)
+    all_data[[data_type]]$year2 <- tag_Nikos(all_data[[data_type]]$year2)
+    
   }
   if("16S" %in% data_types & "ITS" %in% data_types) {
     # take intersection of 16S and ITS samples
@@ -817,13 +830,21 @@ get_taxon_label <- function(data, taxon_idx, data_type) {
   } else if(data_type == "ITS") {
     tax_obj <- data$ITS$tax
   } else {
-    stop("Invalid taxon index!\n")
+    D.taxa <- get_ntaxa(data)
+    D.16S <- D.taxa$D.16S
+    D.ITS <- D.taxa$D.ITS
+    if(taxon_idx <= D.16S) {
+      tax_obj <- data$`16S`$tax
+    } else {
+      tax_obj <- data$ITS$tax
+      taxon_idx <- taxon_idx - D.16S
+    }
   }
   
   label_level <- ncol(tax_obj)
   phylo_names <- colnames(tax_obj)
   label_content <- NA
-  while(is.na(label_content)) {
+  while(is.na(label_content) | str_detect(label_content, "uncultured") | str_detect(label_content, "gut metagenome") | str_detect(label_content, "unidentified")) {
     label_content <- tax_obj[taxon_idx,label_level]
     label <- paste(phylo_names[label_level], label_content)
     label_level <- label_level - 1
@@ -850,7 +871,8 @@ get_high_conf_associations <- function(data, correlations, threshold = 0.5) {
     group_by(taxon1, taxon2) %>%
     summarise(p2.5 = quantile(value, prob=0.025),
               mean = mean(value),
-              p97.5 = quantile(value, prob=0.975)) %>%
+              p97.5 = quantile(value, prob=0.975),
+              .groups = 'keep') %>%
     ungroup()
   # "high confidence" indices have a 95% interval that doesn't span zero (i.e. they're consistent with respect to interaction sign)
   high_conf_idx <- which(sign(correlations_quantiles$p2.5) == sign(correlations_quantiles$p97.5))
@@ -920,18 +942,26 @@ get_quantiles <- function(df) {
               p25 = quantile(value, prob=0.25),
               mean = mean(value),
               p75 = quantile(value, prob=0.75),
-              p97.5 = quantile(value, prob=0.975)) %>%
+              p97.5 = quantile(value, prob=0.975),
+              .groups = 'keep') %>%
     ungroup()
   return(out_df)  
 }
 
-get_ribbon_plot <- function(prediction_quantiles, data_points = NULL, title = NULL) {
+get_ribbon_plot <- function(prediction_quantiles, data_points = NULL, ylabel = NULL, title = NULL) {
   p <- ggplot() +
     geom_ribbon(data=prediction_quantiles, aes(x=sample, ymin=p2.5, ymax=p97.5), fill="darkgrey", alpha=0.5) +
     geom_ribbon(data=prediction_quantiles, aes(x=sample, ymin=p25, ymax=p75), fill="darkgrey", alpha=0.9) +
     geom_line(data=prediction_quantiles, aes(x=sample, y=mean), color="blue") +
-    xlab("day") +
-    ylab(paste0("CLR(abundance)")) +
+    xlab("observation day")
+  if(is.null(ylabel)) {
+    p <- p + 
+      ylab(paste0("CLR(abundance)"))
+  } else {
+    p <- p + 
+      ylab(ylabel)
+  }
+  p <- p +
     theme_minimal()
   if(!is.null(data_points)) {
     p <- p +
@@ -943,7 +973,7 @@ get_ribbon_plot <- function(prediction_quantiles, data_points = NULL, title = NU
   return(p)
 }
 
-plot_predictive <- function(predictions, data, X_predict, plot_animal, plot_year, plot_taxon) {
+plot_predictive <- function(predictions, data, X_predict, plot_animal, plot_year, plot_taxon, ylabel = NULL) {
   # (laboriously) get something as near a grouth truth as we can manage
   # note: this will be more accurate for highly abundant taxa than lowly abundant ones
   sample_IDs <- get_label_type(data, "SampleID", year = plot_year)
@@ -987,7 +1017,7 @@ plot_predictive <- function(predictions, data, X_predict, plot_animal, plot_year
   prediction_quantiles <- get_quantiles(plot_df[plot_df$taxon == plot_taxon,])
   
   # pass to plotting fn.
-  get_ribbon_plot(prediction_quantiles, data_points = neartruth_df)
+  return(get_ribbon_plot(prediction_quantiles, data_points = neartruth_df, ylabel = ylabel))
 }
 
 # plot random animal x year x taxon
@@ -1014,40 +1044,308 @@ diagnostic_plot <- function(data, model_output, data_type = NULL) {
     stop("Not an allowable data type!")
   }
   cat("Plotting taxon",t_idx,"in animal",animal,"in year",y_idx,"\n")
-  plot_predictive(model_output$predictions, data, model_output$X_predict,
+  p <- plot_predictive(model_output$predictions, data, model_output$X_predict,
                   plot_animal = animal,
                   plot_year = y_idx,
                   plot_taxon = t_idx)
+  show(p)
+}
+
+plot_network <- function(input_file, data_type = "16S", condition = "CON", which_sign = NULL, show_plot = FALSE) {
+
+  # ============================================================================================================
+  #   parse data
+  # ============================================================================================================
+  
+  correlators <- tryCatch({
+    read.table(input_file, sep = "\t", header = TRUE, stringsAsFactors = FALSE)
+  }, error = function(e) {
+    # empty file
+    data.frame(feature_1 = NA, feature_2 = NA, interaction_strength = NA)
+  })
+
+  correlators <- correlators[correlators$feature_1_type == data_type & correlators$feature_2_type == data_type,]
+  correlators <- correlators[correlators$condition == condition,]
+  
+  if(nrow(correlators) == 0) {
+    return(NULL)
+  }
+  
+  # grab the unique features in this table, e.g.
+  # feature_1    feature_2    interaction_strength
+  #         A            B    ...
+  #         A            C    ...
+  #         B            C    ...
+  #
+  # gives c(A, B, C)
+  items <- sort(unique(c(correlators$feature_1, correlators$feature_2)))
+  n_items <- length(items)
+  n_interactions <- nrow(correlators)
+  
+  # ============================================================================================================
+  #   assign plot node positions (points around a circle of radius `radius`)
+  # ============================================================================================================
+  
+  radius <- 10 # this doesn't really matter
+  
+  nodes <- data.frame(item = character(n_items), x = numeric(n_items), y = numeric(n_items),
+                      stringsAsFactors = FALSE)
+  for(i in 1:n_items) {
+    x <- radius * cos(2 * pi * i / n_items)
+    y <- radius * sin(2 * pi * i / n_items)
+    nodes$item[i] <- items[i]
+    nodes$x[i] <- -x
+    nodes$y[i] <- y
+  }
+  nodes$label <- 1:n_items
+
+  # find the (vertically) topmost element, we'll call this no. 1
+  topmost_idx <- which(nodes$y == max(nodes$y))
+  if(topmost_idx > 1) {
+    nodes$label <- c(seq(from = (n_items-topmost_idx+2), to = n_items), seq(from = 1,
+                                                                            to = (n_items - topmost_idx + 1)))
+  }
+
+  # ============================================================================================================
+  #   now that we have positions, label the interaction edges
+  # ============================================================================================================
+  
+  edges <- data.frame(x1 = numeric(n_interactions), y1 = numeric(n_interactions),
+                      x2 = numeric(n_interactions), y2 = numeric(n_interactions),
+                      weight = numeric(n_interactions), sign = numeric(n_interactions))
+  for(i in 1:n_interactions) {
+    # string matching could be a problem here; in which case we'd just want unique numeric indices for
+    # "features"
+    edges$x1[i] <- nodes[nodes$item == correlators[i,]$feature_1,]$x
+    edges$y1[i] <- nodes[nodes$item == correlators[i,]$feature_1,]$y
+    edges$x2[i] <- nodes[nodes$item == correlators[i,]$feature_2,]$x
+    edges$y2[i] <- nodes[nodes$item == correlators[i,]$feature_2,]$y
+    edges$weight[i] <- abs(correlators[i,]$interaction_strength)*8 # the scalar here is just because this is the easiest way to adjust
+    # edge thickness in the plot
+    edges$sign[i] <- sign(correlators[i,]$interaction_strength)
+  }
+
+  # ============================================================================================================
+  #   PLOT WITH LABELS
+  # ============================================================================================================
+
+  colors <- c("#E6194B", # green
+              "#3CB44B") # red
+  if(!is.null(which_sign)) {
+    if(which_sign == "negative") {
+      edges <- edges[edges$sign < 0,]
+      colors <- colors[1]
+    } else {
+      edges <- edges[edges$sign > 0,]
+      colors <- colors[2]
+    }
+  }
+  
+  p <- ggplot() +
+    geom_segment(data = edges, aes(x = x1, y = y1, xend = x2, yend = y2, color = as.factor(sign), size = weight), alpha = 0.66) +
+    scale_color_manual(values = colors) +
+    scale_size_identity() + # use the width specified by `weight`
+    geom_point(data = nodes, aes(x = x, y = y), size = 7) +
+    geom_text(data = nodes, aes(x = x, y = y, label = label), size = 4, color = "#FFFFFF") +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank()) +
+    theme(legend.position = "none") +
+    xlim(-radius*1.2, radius*4) +
+    ylim(-radius*1.2, radius*1.2)
+  
+  # crudely work out some spacing
+  legend_tl_x <- radius
+  legend_tl_y <- max(nodes$y)
+  item_space_x <- radius*0.08 # this is the horizontal distance from bullet to feature name in the legend
+  item_space_y <- radius*0.08 # this is the vertical distance between bullets in the legend
+
+  reorder.order <- order(nodes$label)
+  legend_df <- data.frame(item = nodes$item[reorder.order], label = nodes$label[reorder.order])
+  legend_df$x_label <- radius*1.5
+  legend_df$y_label <- legend_tl_y - seq(from = 0, to = n_items*item_space_y, length.out = n_items)
+  legend_df$x_item <- legend_df$x_label + item_space_x
+  legend_df$y_item <- legend_df$y_label
+
+  # manually plot legend
+  p <- p +
+    geom_point(data = legend_df, aes(x = x_label, y = y_label), size = 7) + 
+    geom_text(data = legend_df, aes(x = x_label, y = y_label, label = label), size = 4, color = "#FFFFFF") +
+    geom_text(data = legend_df, aes(x = x_item, y = y_item, label = item), size = 4, hjust = 0)
+  if(show_plot) {
+    show(p)
+  }
+  sign_append <- ""
+  if(!is.null(which_sign)) {
+    sign_append <- paste0("_",which_sign)
+  }
+  ggsave(file.path("output",paste0(data_type,"_",condition,"_interactions",sign_append,".png")),
+         p, units="in", dpi=100, height=8, width=15)
 }
 
 # =====================================================================================================
 #   MAIN LOGIC WORKFLOW
 # =====================================================================================================
 
-# NOTES:
-# (1) need to remove Nikos' samples
-# (2) could switch CLR to IQLR?
-# (3) could calculate baselines from overall resampling in fit_GP()
-
+# improvements:
+# (1) switch CLR to IQLR?
+# (2) could calculate baselines from overall resampling in fit_GP()
+#
 # for Brianna, Zack -- how can we generalize this such that sub-item YEARS don't need to be present?!
+#
+# basically no correlators show up in the ITS data unless you relax the correlation threshold to 0.4
+# and these are not convincing
 
-all_data <- get_data(data_type = "16S")
+threshold <- 0 # if threshold is zero, we'll evaluate thresholding: visualizing correlators within range
+               # of apparent posterior correlation (e.g. [0.4, 0.5))
 
-treatment_data <- pull_treatment_data(all_data, treatment = "ABX")
-# set the order of individuals in the combined series
-canonical_animal_order <- unique(get_label_type(treatment_data, "Animal"))
+for(data_type in c("16S")) {
+  if(data_type == "BOTH") {
+    all_data <- get_data(data_type = NULL)
+  } else {
+    all_data <- get_data(data_type = data_type)
+  }
+  
+  for(treatment in c("CON", "ABX", "ABXFT")) {
+    cat("Evaluating",data_type,"x",treatment,"\n")
+    treatment_data <- pull_treatment_data(all_data, treatment = treatment)
+    # set the order of individuals in the combined series
+    canonical_animal_order <- unique(get_label_type(treatment_data, "Animal"))
+    
+    model_output <- fit_model(treatment_data, canonical_animal_order, resample_iterations = 100, get_predictions = TRUE)
+    # sanity check the fit via: diagnostic_plot(treatment_data, model_output, data_type = NULL) # plot a random feature
+    
+    if(data_type == "BOTH") {
+      # look at the average Sigma
+      mean_Sigma_corr <- apply(model_output$correlations, c(1,2), mean)
+      mean_Sigma_long <- driver::gather_array(mean_Sigma_corr, "value", "row", "col")
+      p <- ggplot(mean_Sigma_long, aes(row, col, fill=value)) + 
+        geom_tile() +
+        scale_fill_gradient2(low = "darkblue", high = "darkred", name = "correlation")
+      ggsave(file.path("output",paste0(data_type,"_",treatment,"_correlmat.png")), p, dpi = 100, units = "in", height = 8, width = 10)
+    }
+    
+    if(threshold > 0) {
+      # evaluate high confidence correlators at the specified threshold mean (high confidence) correlation
+      hcc <- get_high_conf_associations(treatment_data, model_output$correlations, threshold = threshold)
+      cat("Found",nrow(hcc),"high confidence interactors\n")
+      if(nrow(hcc) > 0) {
+        write_tsv(x = hcc, path = file.path("output",paste0(data_type,"_",treatment,"_highconftable.tsv")))
+        
+        # plot max correlators for visualization
+        plot_pair <- sample(1:ncol(model_output$X))[1]
+        plot_animal <- unname(model_output$X[2,plot_pair])
+        plot_year <- as.numeric(unname(model_output$X[3,plot_pair]))
+        if(treatment != "BOTH") {
+          plot_hcc_row <- which(hcc$mean_correlation == max(abs(hcc$mean_correlation)))
+        } else {
+          cross_correlation <- hcc[hcc$type1 != hcc$type2,]
+          cc_row <- which(cross_correlation$mean_correlation == max(abs(cross_correlation$mean_correlation)))
+          plot_hcc_row <- rownames(hcc)[which(rownames(hcc) == rownames(cross_correlation)[cc_row])]
+        }
+        
+        p1 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
+                              plot_animal = plot_animal, plot_year = plot_year, plot_taxon = hcc[plot_hcc_row,]$idx1,
+                              ylabel = paste0(hcc[plot_hcc_row,]$label1, " (CLR)"))
+        p2 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
+                              plot_animal = plot_animal, plot_year = plot_year, plot_taxon = hcc[plot_hcc_row,]$idx2,
+                              ylabel = paste0(hcc[plot_hcc_row,]$label2, " (CLR)"))
+        p <- grid.arrange(p1, p2, nrow = 2, top = textGrob(paste0("\"",plot_animal,"\" Year ",plot_year," (Correlation: ",round(hcc[plot_hcc_row,]$mean_correlation, 3),")")))
+        ggsave(file.path("output",paste0(data_type,"_",treatment,"_strongcorrelator.png")), p, dpi = 100, units = "in", height = 6, width = 10)
+        
+        network_file <- file.path("output","network_input.txt")
+        if(!file.exists(network_file)) {
+          write("feature_1\tfeature_2\tinteraction_strength\tfeature_1_type\tfeature_2_type\tcondition", file = network_file)
+        }
+        for(i in 1:nrow(hcc)) {
+          write(paste0(hcc$label1[i],"\t",hcc$label2[i],"\t",hcc$mean_correlation[i],"\t",
+                       hcc$type1[i],"\t",hcc$type2[i],"\t",treatment),
+                file = network_file,
+                append = TRUE)
+        }
+        
+        if(data_type != "BOTH") {
+          plot_network(network_file, data_type = data_type, condition = treatment, which_sign = NULL, show_plot = FALSE)
+        }
+      }
+    } else if(data_type != "BOTH") {
+      correlations <- model_output$correlations
+      resample_iterations <- dim(correlations)[3]
+      for(resample_iteration in 1:resample_iterations) {
+        temp <- correlations[,,resample_iteration]
+        temp[upper.tri(temp, diag=TRUE)] <- NA
+        correlations[,,resample_iteration] <- temp
+      }
+      correlations_df <- driver::gather_array(correlations, "value", "taxon1", "taxon2", "sample")
+      # remove redundant entries and diagonal (tagged as NA)
+      correlations_df <- correlations_df[complete.cases(correlations_df),]
+      # this takes ~30 sec. to run
+      median_post_corr <- as.data.frame(correlations_df %>%
+        group_by(taxon1, taxon2) %>%
+        summarise(median = median(value),
+                  lower95 = quantile(value, probs = c(0.025)),
+                  upper95 = quantile(value, probs = c(0.975)),
+                  .groups = 'keep'))
+      bounds <- seq(0.3, 0.9, by = 0.1)
+      for(bound in bounds) {
+        cat("Evaluating pairs with correlation",bound,"to",(bound + 0.1),"\n")
+        criterion1 <- median_post_corr$median > bound
+        criterion2 <- median_post_corr$median < (bound + 0.1)
+        qualified_pairs <- which(criterion1 & criterion2)
+        cat("\tFound",length(qualified_pairs),"pairs...\n")
+        if(length(qualified_pairs) > 0) {
+          idx <- qualified_pairs[1:min(3,length(qualified_pairs))]
+          for(i in 1:length(idx)) {
+            r_idx <- idx[i]
+            idx1 <- median_post_corr$taxon1[r_idx]
+            idx2 <- median_post_corr$taxon2[r_idx]
+            # get labels for these taxa
+            label1 <- get_taxon_label(data = treatment_data, taxon_idx = idx1, data_type = data_type)
+            label2 <- get_taxon_label(data = treatment_data, taxon_idx = idx2, data_type = data_type)
+            
+            plots <- list()
+            pairs_used <- c()
+            for(j in 1:min(4, length(unique(apply(model_output$X_predict[2:3,], 2, function(x) paste0(x[1], x[2])))))) {
+              # plot k instances of this pair
+              new_pair <- FALSE
+              while(!new_pair) {
+                plot_pair <- sample(1:ncol(model_output$X_predict))[1]
+                plot_animal <- unname(model_output$X_predict[2,plot_pair])
+                plot_year <- as.numeric(unname(model_output$X_predict[3,plot_pair]))
+                slug <- paste0(plot_animal,plot_year)
+                if(!(slug %in% pairs_used)) {
+                  new_pair <- TRUE
+                }
+              }
+              pairs_used <- c(pairs_used, slug)
 
-model_output <- fit_model(treatment_data, canonical_animal_order, resample_iterations = 50, get_predictions = TRUE)
-diagnostic_plot(treatment_data, model_output, data_type = NULL)
-
-hcc <- get_high_conf_associations(treatment_data, model_output$correlations, threshold = 0.5)
-head(hcc)
-
-sink("network_input2.txt")
-cat("feature_1\tfeature_2\tinteraction_strength\n")
-for(i in 1:nrow(hcc)) {
-  cat(paste0(hcc$label1[i],"\t",hcc$label2[i],"\t",hcc$mean_correlation[i],"\n"))
+              p1 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
+                                    plot_animal = plot_animal, plot_year = plot_year, plot_taxon = idx1)
+              p1 <- p1 +
+                ggtitle(paste0(plot_animal," (Y",plot_year,")")) +
+                theme(plot.title = element_text(size = 12))
+              plots[[length(plots)+1]] <- p1
+              p2 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
+                                    plot_animal = plot_animal, plot_year = plot_year, plot_taxon = idx2)
+              p2 <- p2 +
+                ggtitle(paste0(plot_animal," (Y",plot_year,")")) +
+                theme(plot.title = element_text(size = 12))
+              plots[[length(plots)+1]] <- p2
+            }
+            p <- grid.arrange(grobs = plots, ncol = 2, top = textGrob(paste0(label1," x ",label2,"\n",
+                                                                             "median correlation: ",round(median_post_corr$median[r_idx], 2),"\n",
+                                                                             "95% interval: (",round(median_post_corr$lower95[r_idx], 2),", ",
+                                                                                              round(median_post_corr$upper95[r_idx], 2),")")))
+            ggsave(file.path("output","diagnostic",paste0(data_type,"_",treatment,"_interval_",bound,"_",i,".png")),
+                   p, dpi = 100, units = "in", height = 10, width = 10)
+          }
+        }
+      }
+    }
+  }
 }
-sink()
+
+
+
 
 
