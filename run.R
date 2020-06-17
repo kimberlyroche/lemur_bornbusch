@@ -1051,7 +1051,7 @@ diagnostic_plot <- function(data, model_output, data_type = NULL) {
   show(p)
 }
 
-plot_network <- function(input_file, data_type = "16S", condition = "CON", which_sign = NULL, show_plot = FALSE) {
+plot_network <- function(input_file, data_type = "16S", conditions = c("ABX", "ABXFT"), which_sign = NULL, show_plot = FALSE) {
 
   # ============================================================================================================
   #   parse data
@@ -1065,7 +1065,7 @@ plot_network <- function(input_file, data_type = "16S", condition = "CON", which
   })
 
   correlators <- correlators[correlators$feature_1_type == data_type & correlators$feature_2_type == data_type,]
-  correlators <- correlators[correlators$condition == condition,]
+  correlators <- correlators[correlators$condition %in% conditions,]
   
   if(nrow(correlators) == 0) {
     return(NULL)
@@ -1080,7 +1080,7 @@ plot_network <- function(input_file, data_type = "16S", condition = "CON", which
   # gives c(A, B, C)
   items <- sort(unique(c(correlators$feature_1, correlators$feature_2)))
   n_items <- length(items)
-  n_interactions <- nrow(correlators)
+  n_interactions <- table(correlators$condition)
   
   # ============================================================================================================
   #   assign plot node positions (points around a circle of radius `radius`)
@@ -1106,81 +1106,91 @@ plot_network <- function(input_file, data_type = "16S", condition = "CON", which
                                                                             to = (n_items - topmost_idx + 1)))
   }
 
-  # ============================================================================================================
-  #   now that we have positions, label the interaction edges
-  # ============================================================================================================
-  
-  edges <- data.frame(x1 = numeric(n_interactions), y1 = numeric(n_interactions),
-                      x2 = numeric(n_interactions), y2 = numeric(n_interactions),
-                      weight = numeric(n_interactions), sign = numeric(n_interactions))
-  for(i in 1:n_interactions) {
-    # string matching could be a problem here; in which case we'd just want unique numeric indices for
-    # "features"
-    edges$x1[i] <- nodes[nodes$item == correlators[i,]$feature_1,]$x
-    edges$y1[i] <- nodes[nodes$item == correlators[i,]$feature_1,]$y
-    edges$x2[i] <- nodes[nodes$item == correlators[i,]$feature_2,]$x
-    edges$y2[i] <- nodes[nodes$item == correlators[i,]$feature_2,]$y
-    edges$weight[i] <- abs(correlators[i,]$interaction_strength)*8 # the scalar here is just because this is the easiest way to adjust
-    # edge thickness in the plot
-    edges$sign[i] <- sign(correlators[i,]$interaction_strength)
-  }
-
-  # ============================================================================================================
-  #   PLOT WITH LABELS
-  # ============================================================================================================
-
-  colors <- c("#E6194B", # green
-              "#3CB44B") # red
-  if(!is.null(which_sign)) {
-    if(which_sign == "negative") {
-      edges <- edges[edges$sign < 0,]
-      colors <- colors[1]
-    } else {
-      edges <- edges[edges$sign > 0,]
-      colors <- colors[2]
+  for(condition in conditions) {
+    
+    # ============================================================================================================
+    #   now that we have positions, label the interaction edges
+    # ============================================================================================================
+    
+    n_interactions_cond <- n_interactions[[condition]]
+    correlators_cond <- correlators[correlators$condition == condition,]
+    correlators_cond[1,]
+    edges <- data.frame(x1 = numeric(n_interactions_cond), y1 = numeric(n_interactions_cond),
+                        x2 = numeric(n_interactions_cond), y2 = numeric(n_interactions_cond),
+                        weight = numeric(n_interactions_cond), sign = numeric(n_interactions_cond))
+    for(i in 1:n_interactions_cond) {
+      # string matching could be a problem here; in which case we'd just want unique numeric indices for
+      # "features"
+      edges$x1[i] <- nodes[nodes$item == correlators_cond[i,]$feature_1,]$x
+      edges$y1[i] <- nodes[nodes$item == correlators_cond[i,]$feature_1,]$y
+      edges$x2[i] <- nodes[nodes$item == correlators_cond[i,]$feature_2,]$x
+      edges$y2[i] <- nodes[nodes$item == correlators_cond[i,]$feature_2,]$y
+      edges$weight[i] <- abs(correlators_cond[i,]$interaction_strength)*11 # the scalar here is just because this is the easiest way to adjust
+      # edge thickness in the plot
+      edges$sign[i] <- sign(correlators_cond[i,]$interaction_strength)
     }
-  }
+    dim(edges)
+    
+    # ============================================================================================================
+    #   PLOT WITH LABELS
+    # ============================================================================================================
   
-  p <- ggplot() +
-    geom_segment(data = edges, aes(x = x1, y = y1, xend = x2, yend = y2, color = as.factor(sign), size = weight), alpha = 0.66) +
-    scale_color_manual(values = colors) +
-    scale_size_identity() + # use the width specified by `weight`
-    geom_point(data = nodes, aes(x = x, y = y), size = 7) +
-    geom_text(data = nodes, aes(x = x, y = y, label = label), size = 4, color = "#FFFFFF") +
-    theme(panel.grid.major = element_blank(),
-          panel.grid.minor = element_blank(),
-          panel.background = element_blank()) +
-    theme(legend.position = "none") +
-    xlim(-radius*1.2, radius*4) +
-    ylim(-radius*1.2, radius*1.2)
+    colors <- c("#E6194B", # green
+                "#3CB44B") # red
+    if(!is.null(which_sign)) {
+      if(which_sign == "negative") {
+        edges <- edges[edges$sign < 0,]
+        colors <- colors[1]
+      } else {
+        edges <- edges[edges$sign > 0,]
+        colors <- colors[2]
+      }
+    }
+    
+    p <- ggplot() +
+      geom_segment(data = edges, aes(x = x1, y = y1, xend = x2, yend = y2, color = as.factor(sign), size = weight), alpha = 0.66) +
+      scale_color_manual(values = colors) +
+      scale_size_identity() + # use the width specified by `weight`
+      geom_point(data = nodes, aes(x = x, y = y), size = 9) +
+      geom_text(data = nodes, aes(x = x, y = y, label = label), size = 4, color = "#FFFFFF") +
+      theme(panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            panel.background = element_blank()) +
+      theme(legend.position = "none") +
+      xlim(-radius*1.2, radius*4) +
+      ylim(-radius*1.2, radius*1.2)
+    
+    # crudely work out some spacing
+    legend_tl_x <- radius
+    legend_tl_y <- max(nodes$y)
+    item_space_x <- radius*0.08 # this is the horizontal distance from bullet to feature name in the legend
+    item_space_y <- radius*0.08 # this is the vertical distance between bullets in the legend
   
-  # crudely work out some spacing
-  legend_tl_x <- radius
-  legend_tl_y <- max(nodes$y)
-  item_space_x <- radius*0.08 # this is the horizontal distance from bullet to feature name in the legend
-  item_space_y <- radius*0.08 # this is the vertical distance between bullets in the legend
+    reorder.order <- order(nodes$label)
+    legend_df <- data.frame(item = nodes$item[reorder.order], label = nodes$label[reorder.order])
+    legend_df$x_label <- radius*1.5
+    legend_df$y_label <- legend_tl_y - seq(from = 0, to = n_items*item_space_y, length.out = n_items)
+    legend_df$x_item <- legend_df$x_label + item_space_x
+    legend_df$y_item <- legend_df$y_label
+  
+    # manually plot legend
+    p <- p +
+      geom_point(data = legend_df, aes(x = x_label, y = y_label), size = 7) + 
+      geom_text(data = legend_df, aes(x = x_label, y = y_label, label = label), size = 4, color = "#FFFFFF") +
+      geom_text(data = legend_df, aes(x = x_item, y = y_item, label = item), size = 4, hjust = 0) +
+      theme(axis.title.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
+      theme(axis.title.y = element_blank(), axis.text.y = element_blank(), axis.ticks.y = element_blank())
+    if(show_plot) {
+      show(p)
+    }
+    sign_append <- ""
+    if(!is.null(which_sign)) {
+      sign_append <- paste0("_",which_sign)
+    }
+    ggsave(file.path("output",paste0(data_type,"_",condition,"_interactions",sign_append,".pdf")),
+           p, units="in", dpi=100, height=8, width=15)
 
-  reorder.order <- order(nodes$label)
-  legend_df <- data.frame(item = nodes$item[reorder.order], label = nodes$label[reorder.order])
-  legend_df$x_label <- radius*1.5
-  legend_df$y_label <- legend_tl_y - seq(from = 0, to = n_items*item_space_y, length.out = n_items)
-  legend_df$x_item <- legend_df$x_label + item_space_x
-  legend_df$y_item <- legend_df$y_label
-
-  # manually plot legend
-  p <- p +
-    geom_point(data = legend_df, aes(x = x_label, y = y_label), size = 7) + 
-    geom_text(data = legend_df, aes(x = x_label, y = y_label, label = label), size = 4, color = "#FFFFFF") +
-    geom_text(data = legend_df, aes(x = x_item, y = y_item, label = item), size = 4, hjust = 0)
-  if(show_plot) {
-    show(p)
   }
-  sign_append <- ""
-  if(!is.null(which_sign)) {
-    sign_append <- paste0("_",which_sign)
-  }
-  ggsave(file.path("output",paste0(data_type,"_",condition,"_interactions",sign_append,".png")),
-         p, units="in", dpi=100, height=8, width=15)
 }
 
 # =====================================================================================================
@@ -1196,7 +1206,7 @@ plot_network <- function(input_file, data_type = "16S", condition = "CON", which
 # basically no correlators show up in the ITS data unless you relax the correlation threshold to 0.4
 # and these are not convincing
 
-threshold <- 0 # if threshold is zero, we'll evaluate thresholding: visualizing correlators within range
+threshold <- 0.5 # if threshold is zero, we'll evaluate thresholding: visualizing correlators within range
                # of apparent posterior correlation (e.g. [0.4, 0.5))
 
 for(data_type in c("16S")) {
@@ -1206,7 +1216,8 @@ for(data_type in c("16S")) {
     all_data <- get_data(data_type = data_type)
   }
   
-  for(treatment in c("CON", "ABX", "ABXFT")) {
+  conditions <- c("CON", "ABX", "ABXFT")
+  for(treatment in conditions) {
     cat("Evaluating",data_type,"x",treatment,"\n")
     treatment_data <- pull_treatment_data(all_data, treatment = treatment)
     # set the order of individuals in the combined series
@@ -1262,10 +1273,6 @@ for(data_type in c("16S")) {
                        hcc$type1[i],"\t",hcc$type2[i],"\t",treatment),
                 file = network_file,
                 append = TRUE)
-        }
-        
-        if(data_type != "BOTH") {
-          plot_network(network_file, data_type = data_type, condition = treatment, which_sign = NULL, show_plot = FALSE)
         }
       }
     } else if(data_type != "BOTH") {
@@ -1342,6 +1349,9 @@ for(data_type in c("16S")) {
         }
       }
     }
+  }
+  if(data_type != "BOTH") {
+    plot_network(network_file, data_type = data_type, conditions = conditions, which_sign = NULL, show_plot = FALSE)
   }
 }
 
