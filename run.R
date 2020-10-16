@@ -441,7 +441,7 @@ filter_data <- function(raw_data, metadata, level = "genus", filter_percent = NU
 #   metadata -- samples (rows) x annotations (columns) e.g. SampleID, Animal, Year, Date, Day, Treatment
 #
 # if data_type == NULL, pull 16S and ITS
-get_data <- function(data_type = NULL) {
+get_data <- function(data_type = NULL, post_treatment_only = TRUE) {
   all_data <- list()
   data_types <- data_type
   if(is.null(data_type)) {
@@ -459,7 +459,7 @@ get_data <- function(data_type = NULL) {
     all_data[[data_type]] <- list(tax = filtered_data$tax,
                                   year1 = list(filtered = filtered_data$counts[,colnames(filtered_data$counts) %in% metadata$year1$SampleID],
                                            metadata = metadata$year1),
-                                  year2 = list(filtered = filtered_data$counts[,colnames(filtered_data$counts) %in%  metadata$year2$SampleID],
+                                  year2 = list(filtered = filtered_data$counts[,colnames(filtered_data$counts) %in% metadata$year2$SampleID],
                                            metadata = metadata$year2))
     # str(all_data, max.level = 3)
     
@@ -473,13 +473,15 @@ get_data <- function(data_type = NULL) {
       return(data)
     }
 
-    cat("Removing PRE-treatment samples...\n")
-    all_data[[data_type]]$year1 <- tag_samples(all_data[[data_type]]$year1, label = "Pre")
-    all_data[[data_type]]$year2 <- tag_samples(all_data[[data_type]]$year2, label = "Pre")
-    
-    cat("Removing DURING-treatment samples...\n")
-    all_data[[data_type]]$year1 <- tag_samples(all_data[[data_type]]$year1, label = "During")
-    all_data[[data_type]]$year2 <- tag_samples(all_data[[data_type]]$year2, label = "During")
+    if(post_treatment_only) {
+      cat("Removing PRE-treatment samples...\n")
+      all_data[[data_type]]$year1 <- tag_samples(all_data[[data_type]]$year1, label = "Pre")
+      all_data[[data_type]]$year2 <- tag_samples(all_data[[data_type]]$year2, label = "Pre")
+      
+      cat("Removing DURING-treatment samples...\n")
+      all_data[[data_type]]$year1 <- tag_samples(all_data[[data_type]]$year1, label = "During")
+      all_data[[data_type]]$year2 <- tag_samples(all_data[[data_type]]$year2, label = "During")
+    }
     
     # added later: remove Nikos' samples
     tag_Nikos <- function(data) {
@@ -1133,7 +1135,7 @@ plot_network <- function(input_file, data_type = "16S", conditions = c("CON", "A
       edges$x2[i] <- nodes[nodes$item == correlators_cond[i,]$feature_2,]$x
       edges$y2[i] <- nodes[nodes$item == correlators_cond[i,]$feature_2,]$y
       edges$weight[i] <- abs(correlators_cond[i,]$interaction_strength)*11 # fat line weight
-      edges$weight[i] <- abs(correlators_cond[i,]$interaction_strength)*5 # moderate line weight
+      #edges$weight[i] <- abs(correlators_cond[i,]$interaction_strength)*5 # moderate line weight
       # edge thickness in the plot
       # edges$sign[i] <- sign(correlators_cond[i,]$interaction_strength)
       if(correlators_cond[i,]$interaction_strength >= 0) {
@@ -1164,8 +1166,8 @@ plot_network <- function(input_file, data_type = "16S", conditions = c("CON", "A
     edges$sign <- factor(edges$sign, levels = c("negative", "positive"))
     
     p <- ggplot() +
-      geom_segment(data = edges, aes(x = x1, y = y1, xend = x2, yend = y2, color = sign, size = weight)) +
-      # geom_segment(data = edges, aes(x = x1, y = y1, xend = x2, yend = y2, color = as.factor(sign), size = weight), alpha = 0.66) +
+      # geom_segment(data = edges, aes(x = x1, y = y1, xend = x2, yend = y2, color = sign, size = weight)) +
+      geom_segment(data = edges, aes(x = x1, y = y1, xend = x2, yend = y2, color = as.factor(sign), size = weight), alpha = 0.66) +
       # scale_color_manual(values = colors) +
       scale_color_manual(values = c("positive" = "#3CB44B", "negative" = "#E6194B")) +
       scale_size_identity() + # use the width specified by `weight`
@@ -1175,7 +1177,7 @@ plot_network <- function(input_file, data_type = "16S", conditions = c("CON", "A
             panel.grid.minor = element_blank(),
             panel.background = element_blank()) +
       theme(legend.position = "none")
-
+    
     # crudely work out some spacing
     legend_tl_x <- radius
     legend_tl_y <- max(nodes$y)
@@ -1232,9 +1234,13 @@ plot_network <- function(input_file, data_type = "16S", conditions = c("CON", "A
 threshold <- 0.5 # if threshold is zero, we'll evaluate thresholding: visualizing correlators within range
                  # of apparent posterior correlation (e.g. [0.4, 0.5))
 
-use_extra_viz <- TRUE # extra visualization
+use_extra_viz <- FALSE # extra visualization
                       # (1) correlation matrices per condition
                       # (2) plot trajectories ("squiggle plots") for a few selected pairs of taxa
+
+plot_all_taxa <- FALSE
+
+post_treatment_only <- FALSE
 
 for(data_type in c("16S")) {
   if(data_type == "BOTH") {
@@ -1310,28 +1316,26 @@ for(data_type in c("16S")) {
       if(nrow(hcc) > 0) {
         write_tsv(x = hcc, path = file.path("output",paste0(data_type,"_",treatment,"_highconftable.tsv")))
         
-        # plot max correlators for visualization
-        # plot_pair <- sample(1:ncol(model_output$X))[1]
-        # plot_animal <- unname(model_output$X[2,plot_pair])
-        # plot_year <- as.numeric(unname(model_output$X[3,plot_pair]))
-        # if(treatment != "BOTH") {
-        #   plot_hcc_row <- which(hcc$mean_correlation == max(abs(hcc$mean_correlation)))
-        # } else {
-        #   cross_correlation <- hcc[hcc$type1 != hcc$type2,]
-        #   cc_row <- which(cross_correlation$mean_correlation == max(abs(cross_correlation$mean_correlation)))
-        #   plot_hcc_row <- rownames(hcc)[which(rownames(hcc) == rownames(cross_correlation)[cc_row])]
-        # }
+        # # combinations of individual x year
+        # indiv_year_combos <- data.frame(individual = model_output$X[2,], year = model_output$X[3,])
+        # indiv_year_combos <- as.data.frame(indiv_year_combos %>%
+        #   group_by(individual, year) %>%
+        #   tally())
         # 
-        # p1 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
-        #                       plot_animal = plot_animal, plot_year = plot_year, plot_taxon = hcc[plot_hcc_row,]$idx1,
-        #                       ylabel = paste0(hcc[plot_hcc_row,]$label1, " (CLR)"))
-        # p2 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
-        #                       plot_animal = plot_animal, plot_year = plot_year, plot_taxon = hcc[plot_hcc_row,]$idx2,
-        #                       ylabel = paste0(hcc[plot_hcc_row,]$label2, " (CLR)"))
-        # p <- grid.arrange(p1, p2, nrow = 2, top = textGrob(paste0("\"",plot_animal,"\" Year ",plot_year," (Correlation: ",round(hcc[plot_hcc_row,]$mean_correlation, 3),")")))
-        # for(extension in c(".png")) {
-        #   ggsave(file.path("output",paste0(data_type,"_",treatment,"_strongcorrelator",extension)), p, dpi = 100, units = "in", height = 6, width = 10)
+        # plots <- list()
+        # #for(i in 1:nrow(indiv_year_combos)) {
+        # for(i in 1:2) {
+        #   cat(i,"\n")
+        #   p1 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
+        #                         plot_animal = indiv_year_combos[i,]$individual, plot_year = indiv_year_combos[i,]$year,
+        #                         plot_taxon = hcc[2,]$idx1, ylabel = paste0(hcc[2,]$label1, "\n", indiv_year_combos[i,]$individual))
+        #   p2 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
+        #                         plot_animal = indiv_year_combos[i,]$individual, plot_year = indiv_year_combos[i,]$year,
+        #                         plot_taxon = hcc[2,]$idx2, ylabel = paste0(hcc[2,]$label2, "\n", indiv_year_combos[i,]$individual))
+        #   plots[[length(plots) + 1]] <- p1
+        #   plots[[length(plots) + 1]] <- p2
         # }
+        # do.call("grid.arrange", c(plots, ncol = 2))
 
         network_file <- file.path("output","network_input.txt")
         if(!file.exists(network_file)) {
@@ -1345,6 +1349,7 @@ for(data_type in c("16S")) {
         }
       }
     } else if(data_type != "BOTH") {
+      # This is no longer in use but I'm loath to throw it away.
       correlations <- model_output$correlations
       resample_iterations <- dim(correlations)[3]
       for(resample_iteration in 1:resample_iterations) {
@@ -1418,6 +1423,46 @@ for(data_type in c("16S")) {
           }
         }
       }
+    }
+
+    if(plot_all_taxa) {
+      # plot logratio change in all taxa, so we can see which were killed off by the antibiotics
+  
+      # combinations of individual x year
+      indiv_year_combos <- data.frame(individual = model_output$X[2,], year = model_output$X[3,])
+      indiv_year_combos <- as.data.frame(indiv_year_combos %>%
+        group_by(individual, year) %>%
+        tally())
+      
+      limit <- 10
+      plot_height <- 12
+      if(treatment %in% c("ABX", "ABXFT")) {
+        limit <- nrow(treatment_data$`16S`$year1$filtered)
+        plot_height <- 8
+      }
+      for(tax_idx in 1:limit) {
+        cat("Plotting taxon",tax_idx,"\n")
+        plots <- list()
+        tax_label <- get_taxon_label(treatment_data, taxon_idx = tax_idx, data_type = data_type)
+        for(i in 1:nrow(indiv_year_combos)) {
+          p <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
+                                plot_animal = indiv_year_combos[i,]$individual, plot_year = indiv_year_combos[i,]$year,
+                                plot_taxon = tax_idx, ylabel = paste0(indiv_year_combos[i,]$individual, " (Year ",indiv_year_combos[i,]$year,")"))
+          plots[[length(plots) + 1]] <- p
+        }
+        p <- grid.arrange(grobs = plots, top = tax_label, ncol = 2)
+        ggsave(file.path("output", treatment, paste0("taxon_",tax_idx,".png")), plot = p, units = "in",
+               dpi = 150, height = plot_height, width = 6)
+      }
+      
+      # taxa are really different! validate by looking at direct data?
+      # md <- treatment_data$`16S`$year2$metadata
+      # counts <- treatment_data$`16S`$year2$filtered
+      # clr.counts <- as.matrix(counts)
+      # clr.counts <- t(clr(t(clr.counts) + 0.5))
+      # selected_samples <- md[md$Animal == "Onyx" & md$Year == 2,]$Description
+      # selected_days <- md[md$Animal == "Onyx" & md$Year == 2,]$Day
+      # plot(selected_days, clr.counts[1,colnames(counts) %in% selected_samples])
     }
   }
   if(data_type != "BOTH") {
