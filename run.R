@@ -473,11 +473,11 @@ get_data <- function(data_type = NULL, post_treatment_only = TRUE) {
       return(data)
     }
 
+    cat("Removing PRE-treatment samples...\n")
+    all_data[[data_type]]$year1 <- tag_samples(all_data[[data_type]]$year1, label = "Pre")
+    all_data[[data_type]]$year2 <- tag_samples(all_data[[data_type]]$year2, label = "Pre")
+
     if(post_treatment_only) {
-      cat("Removing PRE-treatment samples...\n")
-      all_data[[data_type]]$year1 <- tag_samples(all_data[[data_type]]$year1, label = "Pre")
-      all_data[[data_type]]$year2 <- tag_samples(all_data[[data_type]]$year2, label = "Pre")
-      
       cat("Removing DURING-treatment samples...\n")
       all_data[[data_type]]$year1 <- tag_samples(all_data[[data_type]]$year1, label = "During")
       all_data[[data_type]]$year2 <- tag_samples(all_data[[data_type]]$year2, label = "During")
@@ -486,7 +486,6 @@ get_data <- function(data_type = NULL, post_treatment_only = TRUE) {
     # added later: remove Nikos' samples
     tag_Nikos <- function(data) {
       include_samples <- !str_detect(data$metadata$Animal, "Nikos")
-      # chop "Pre" samples out of metadata
       data$metadata <- data$metadata[include_samples,]
       # used filtered metadata sample IDs/descriptions
       data$filtered <- data$filtered[,colnames(data$filtered) %in% c(tax_labels, as.character(data$metadata$Description))]
@@ -1240,13 +1239,13 @@ use_extra_viz <- FALSE # extra visualization
 
 plot_all_taxa <- FALSE
 
-post_treatment_only <- FALSE
+post_treatment_only <- TRUE
 
 for(data_type in c("16S")) {
   if(data_type == "BOTH") {
-    all_data <- get_data(data_type = NULL)
+    all_data <- get_data(data_type = NULL, post_treatment_only = post_treatment_only)
   } else {
-    all_data <- get_data(data_type = data_type)
+    all_data <- get_data(data_type = data_type, post_treatment_only = post_treatment_only)
   }
   
   conditions <- c("CON", "ABX", "ABXFT")
