@@ -1059,19 +1059,32 @@ diagnostic_plot <- function(data, model_output, data_type = NULL) {
   show(p)
 }
 
-plot_network <- function(input_file, data_type = "16S", conditions = c("CON", "ABX", "ABXFT"), which_sign = NULL, show_plot = FALSE) {
+plot_network <- function(data_type = "16S", conditions = c("CON", "ABX", "ABXFT"), which_sign = NULL, show_plot = FALSE) {
 
   # ============================================================================================================
   #   parse data
   # ============================================================================================================
   
-  correlators <- tryCatch({
-    read.table(input_file, sep = "\t", header = TRUE, stringsAsFactors = FALSE)
-  }, error = function(e) {
-    # empty file
-    data.frame(feature_1 = NA, feature_2 = NA, interaction_strength = NA)
-  })
-
+  filenames <- list("during-post" = file.path("output","network_input_during-post.txt"),
+                    "post" = file.path("output","network_input_post.txt"))
+  setups <- names(filenames)
+  correlators <- NULL
+  for(setup in setups) {
+    input_file <- filenames[[setup]]
+    setup_correlators <- tryCatch({
+      read.table(input_file, sep = "\t", header = TRUE, stringsAsFactors = FALSE)
+    }, error = function(e) {
+      # empty file
+      data.frame(feature_1 = NA, feature_2 = NA, interaction_strength = NA)
+    })
+    setup_correlators$setup <- setup
+    if(is.null(correlators)) {
+      correlators <- setup_correlators
+    } else {
+      correlators <- rbind(correlators, setup_correlators)
+    }
+  }
+  
   correlators <- correlators[correlators$feature_1_type == data_type & correlators$feature_2_type == data_type,]
   correlators <- correlators[correlators$condition %in% conditions,]
   
@@ -1079,6 +1092,11 @@ plot_network <- function(input_file, data_type = "16S", conditions = c("CON", "A
     return(NULL)
   }
   
+  View(correlators)
+  
+  # For testing
+  correlators <- correlators[c(2:4, 70:72),]
+
   # grab the unique features in this table, e.g.
   # feature_1    feature_2    interaction_strength
   #         A            B    ...
@@ -1088,8 +1106,7 @@ plot_network <- function(input_file, data_type = "16S", conditions = c("CON", "A
   # gives c(A, B, C)
   items <- sort(unique(c(correlators$feature_1, correlators$feature_2)))
   n_items <- length(items)
-  n_interactions <- table(correlators$condition)
-  
+
   # ============================================================================================================
   #   assign plot node positions (points around a circle of radius `radius`)
   # ============================================================================================================
@@ -1119,100 +1136,102 @@ plot_network <- function(input_file, data_type = "16S", conditions = c("CON", "A
     # ============================================================================================================
     #   now that we have positions, label the interaction edges
     # ============================================================================================================
-    
-    n_interactions_cond <- n_interactions[[condition]]
-    correlators_cond <- correlators[correlators$condition == condition,]
-    correlators_cond[1,]
-    edges <- data.frame(x1 = numeric(n_interactions_cond), y1 = numeric(n_interactions_cond),
-                        x2 = numeric(n_interactions_cond), y2 = numeric(n_interactions_cond),
-                        weight = numeric(n_interactions_cond), sign = character(n_interactions_cond))
-    for(i in 1:n_interactions_cond) {
-      # string matching could be a problem here; in which case we'd just want unique numeric indices for
-      # "features"
-      edges$x1[i] <- nodes[nodes$item == correlators_cond[i,]$feature_1,]$x
-      edges$y1[i] <- nodes[nodes$item == correlators_cond[i,]$feature_1,]$y
-      edges$x2[i] <- nodes[nodes$item == correlators_cond[i,]$feature_2,]$x
-      edges$y2[i] <- nodes[nodes$item == correlators_cond[i,]$feature_2,]$y
-      edges$weight[i] <- abs(correlators_cond[i,]$interaction_strength)*11 # fat line weight
-      #edges$weight[i] <- abs(correlators_cond[i,]$interaction_strength)*5 # moderate line weight
-      # edge thickness in the plot
-      # edges$sign[i] <- sign(correlators_cond[i,]$interaction_strength)
-      if(correlators_cond[i,]$interaction_strength >= 0) {
-        edges$sign[i] <- "positive"
-      } else {
-        edges$sign[i] <- "negative"
+    for(setup in setups) { 
+      n_interactions_cond <- nrow(correlators[correlators$condition == condition & correlators$setup == setup,])
+      correlators_cond <- correlators[correlators$condition == condition & correlators$setup == setup,]
+      edges <- data.frame(x1 = numeric(n_interactions_cond), y1 = numeric(n_interactions_cond),
+                          x2 = numeric(n_interactions_cond), y2 = numeric(n_interactions_cond),
+                          weight = numeric(n_interactions_cond), sign = character(n_interactions_cond))
+      for(i in 1:n_interactions_cond) {
+        # string matching could be a problem here; in which case we'd just want unique numeric indices for
+        # "features"
+        edges$x1[i] <- nodes[nodes$item == correlators_cond[i,]$feature_1,]$x
+        edges$y1[i] <- nodes[nodes$item == correlators_cond[i,]$feature_1,]$y
+        edges$x2[i] <- nodes[nodes$item == correlators_cond[i,]$feature_2,]$x
+        edges$y2[i] <- nodes[nodes$item == correlators_cond[i,]$feature_2,]$y
+        edges$weight[i] <- abs(correlators_cond[i,]$interaction_strength)*11 # fat line weight
+        #edges$weight[i] <- abs(correlators_cond[i,]$interaction_strength)*5 # moderate line weight
+        # edge thickness in the plot
+        # edges$sign[i] <- sign(correlators_cond[i,]$interaction_strength)
+        if(correlators_cond[i,]$interaction_strength >= 0) {
+          edges$sign[i] <- "positive"
+        } else {
+          edges$sign[i] <- "negative"
+        }
       }
-    }
-    dim(edges)
+      dim(edges)
+      
+      # ============================================================================================================
+      #   PLOT WITH LABELS
+      # ============================================================================================================
     
-    # ============================================================================================================
-    #   PLOT WITH LABELS
-    # ============================================================================================================
-  
-    colors <- c("#E6194B", # red
-                "#3CB44B") # green
-    # if(!is.null(which_sign)) {
-    #   if(which_sign == "negative") {
-    #     edges <- edges[edges$sign < 0,]
-    #     colors <- colors[1]
-    #   } else {
-    #     edges <- edges[edges$sign > 0,]
-    #     colors <- colors[2]
-    #   }
-    # }
+      colors <- c("#E6194B", # red
+                  "#3CB44B") # green
+      # if(!is.null(which_sign)) {
+      #   if(which_sign == "negative") {
+      #     edges <- edges[edges$sign < 0,]
+      #     colors <- colors[1]
+      #   } else {
+      #     edges <- edges[edges$sign > 0,]
+      #     colors <- colors[2]
+      #   }
+      # }
+      
+      # assign factor to signs
+      edges$sign <- factor(edges$sign, levels = c("negative", "positive"))
+      
+      p <- ggplot() +
+        # geom_segment(data = edges, aes(x = x1, y = y1, xend = x2, yend = y2, color = sign, size = weight)) +
+        geom_segment(data = edges, aes(x = x1, y = y1, xend = x2, yend = y2, color = as.factor(sign), size = weight), alpha = 0.66) +
+        # scale_color_manual(values = colors) +
+        scale_color_manual(values = c("positive" = "#3CB44B", "negative" = "#E6194B")) +
+        scale_size_identity() + # use the width specified by `weight`
+        geom_point(data = nodes, aes(x = x, y = y), size = 9) +
+        geom_text(data = nodes, aes(x = x, y = y, label = label), size = 4, color = "#FFFFFF") +
+        theme(panel.grid.major = element_blank(),
+              panel.grid.minor = element_blank(),
+              panel.background = element_blank()) +
+        theme(legend.position = "none")
+      
+      # crudely work out some spacing
+      legend_tl_x <- radius
+      legend_tl_y <- max(nodes$y)
+      item_space_x <- radius*0.08 # this is the horizontal distance from bullet to feature name in the legend
+      item_space_y <- radius*0.08 # this is the vertical distance between bullets in the legend
     
-    # assign factor to signs
-    edges$sign <- factor(edges$sign, levels = c("negative", "positive"))
+      reorder.order <- order(nodes$label)
+      legend_df <- data.frame(item = nodes$item[reorder.order], label = nodes$label[reorder.order])
+      legend_df$x_label <- radius*1.5
+      legend_df$y_label <- legend_tl_y - seq(from = 0, to = n_items*item_space_y, length.out = n_items)
+      legend_df$x_item <- legend_df$x_label + item_space_x
+      legend_df$y_item <- legend_df$y_label
     
-    p <- ggplot() +
-      # geom_segment(data = edges, aes(x = x1, y = y1, xend = x2, yend = y2, color = sign, size = weight)) +
-      geom_segment(data = edges, aes(x = x1, y = y1, xend = x2, yend = y2, color = as.factor(sign), size = weight), alpha = 0.66) +
-      # scale_color_manual(values = colors) +
-      scale_color_manual(values = c("positive" = "#3CB44B", "negative" = "#E6194B")) +
-      scale_size_identity() + # use the width specified by `weight`
-      geom_point(data = nodes, aes(x = x, y = y), size = 9) +
-      geom_text(data = nodes, aes(x = x, y = y, label = label), size = 4, color = "#FFFFFF") +
-      theme(panel.grid.major = element_blank(),
-            panel.grid.minor = element_blank(),
-            panel.background = element_blank()) +
-      theme(legend.position = "none")
-    
-    # crudely work out some spacing
-    legend_tl_x <- radius
-    legend_tl_y <- max(nodes$y)
-    item_space_x <- radius*0.08 # this is the horizontal distance from bullet to feature name in the legend
-    item_space_y <- radius*0.08 # this is the vertical distance between bullets in the legend
-  
-    reorder.order <- order(nodes$label)
-    legend_df <- data.frame(item = nodes$item[reorder.order], label = nodes$label[reorder.order])
-    legend_df$x_label <- radius*1.5
-    legend_df$y_label <- legend_tl_y - seq(from = 0, to = n_items*item_space_y, length.out = n_items)
-    legend_df$x_item <- legend_df$x_label + item_space_x
-    legend_df$y_item <- legend_df$y_label
-  
-    margin <- 1.05
-    xlimits <- c(min(c(edges$x1, edges$x2))*margin, max(c(edges$x1, edges$x2, legend_df$x_item*2))*margin)
-    ylimits <- c(min(c(edges$y1, edges$y2, legend_df$y_item))*margin, max(c(edges$y1, edges$y2, legend_df$y_item))*margin)
-    
-    # manually plot legend
-    p <- p +
-      geom_point(data = legend_df, aes(x = x_label, y = y_label), size = 7) + 
-      geom_text(data = legend_df, aes(x = x_label, y = y_label, label = label), size = 4, color = "#FFFFFF") +
-      geom_text(data = legend_df, aes(x = x_item, y = y_item, label = item), size = 4, hjust = 0) +
-      theme(axis.title.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
-      theme(axis.title.y = element_blank(), axis.text.y = element_blank(), axis.ticks.y = element_blank()) +
-      xlim(xlimits) +
-      ylim(ylimits)
-    if(show_plot) {
-      show(p)
-    }
-    sign_append <- ""
-    if(!is.null(which_sign)) {
-      sign_append <- paste0("_",which_sign)
-    }
-    for(extension in c(".eps",".png")) {
-      ggsave(file.path("output",paste0(data_type,"_",condition,"_interactions",sign_append,extension)),
-             p, units="in", dpi=150, height = (abs(ylimits[1]) + abs(ylimits[2]))/4, width = (abs(xlimits[1]) + abs(xlimits[2]))/4)
+      margin <- 1.05
+      # xlimits <- c(min(c(edges$x1, edges$x2))*margin, max(c(edges$x1, edges$x2, legend_df$x_item*2))*margin)
+      # ylimits <- c(min(c(edges$y1, edges$y2, legend_df$y_item))*margin, max(c(edges$y1, edges$y2, legend_df$y_item))*margin)
+      xlimits <- c(min(nodes$x)*margin, max(c(nodes$x, legend_df$x_item*2))*margin)
+      ylimits <- c(min(c(nodes$x, legend_df$y_item))*margin, max(c(nodes$x, legend_df$y_item))*margin)
+
+      # manually plot legend
+      p <- p +
+        geom_point(data = legend_df, aes(x = x_label, y = y_label), size = 7) + 
+        geom_text(data = legend_df, aes(x = x_label, y = y_label, label = label), size = 4, color = "#FFFFFF") +
+        geom_text(data = legend_df, aes(x = x_item, y = y_item, label = item), size = 4, hjust = 0) +
+        theme(axis.title.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
+        theme(axis.title.y = element_blank(), axis.text.y = element_blank(), axis.ticks.y = element_blank()) +
+        xlim(xlimits) +
+        ylim(ylimits)
+      if(show_plot) {
+        show(p)
+      }
+      sign_append <- ""
+      if(!is.null(which_sign)) {
+        sign_append <- paste0("_",which_sign)
+      }
+      for(extension in c(".eps",".png")) {
+        ggsave(file.path("output",paste0(data_type,"_",condition,"_interactions",sign_append,"_",setup,extension)),
+               p, units="in", dpi=150, height = (abs(ylimits[1]) + abs(ylimits[2]))/4, width = (abs(xlimits[1]) + abs(xlimits[2]))/4)
+      }
     }
   }
 }
@@ -1239,234 +1258,239 @@ use_extra_viz <- FALSE # extra visualization
 
 plot_all_taxa <- FALSE
 
-post_treatment_only <- TRUE
-
-for(data_type in c("16S")) {
-  if(data_type == "BOTH") {
-    all_data <- get_data(data_type = NULL, post_treatment_only = post_treatment_only)
-  } else {
-    all_data <- get_data(data_type = data_type, post_treatment_only = post_treatment_only)
-  }
-  
-  conditions <- c("CON", "ABX", "ABXFT")
-  for(treatment in conditions) {
-    cat("Evaluating",data_type,"x",treatment,"\n")
-    treatment_data <- pull_treatment_data(all_data, treatment = treatment)
-    # set the order of individuals in the combined series
-    canonical_animal_order <- unique(get_label_type(treatment_data, "Animal"))
-    
-    model_output <- fit_model(treatment_data, canonical_animal_order, resample_iterations = 100, get_predictions = TRUE)
-    # sanity check the fit via: diagnostic_plot(treatment_data, model_output, data_type = NULL) # plot a random feature
-    
-    # saveRDS(apply(model_output$correlations, c(1,2), mean), file = paste0(treatment, "_Sigma.rds"))
-  
-    if(data_type == "16S" & use_extra_viz) {
-      # plot correlation matrices
-      # we'll look at the average Sigma
-      mean_Sigma_corr <- apply(model_output$correlations, c(1,2), mean)
-      mean_Sigma_long <- driver::gather_array(mean_Sigma_corr, "value", "row", "col")
-      p <- ggplot(mean_Sigma_long, aes(row, col, fill=value)) + 
-        geom_tile() +
-        scale_fill_gradient2(low = "darkblue", high = "darkred", name = "correlation")
-      for(extension in c(".png")) {
-        ggsave(file.path("output",paste0(data_type,"_",treatment,"_correlmat",extension)),
-               p, dpi = 100, units = "in", height = 8, width = 10)
-      }
-      # plot selected trajectories
-      if(treatment == "CON") {
-        idx1 <- 157
-        idx2 <- 127
-      }
-      if(treatment == "ABX") {
-        idx1 <- 7
-        idx2 <- 26
-      }
-      if(treatment == "ABXFT") {
-        idx1 <- 110
-        idx2 <- 26
-      }
-      label1 <- get_taxon_label(data = treatment_data, taxon_idx = idx1, data_type = data_type)
-      label2 <- get_taxon_label(data = treatment_data, taxon_idx = idx2, data_type = data_type)
-      plots <- list()
-      plot_pair <- sample(1:ncol(model_output$X_predict))[1]
-      plot_animal <- unname(model_output$X_predict[2,plot_pair])
-      plot_year <- as.numeric(unname(model_output$X_predict[3,plot_pair]))
-      p1 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
-                            plot_animal = plot_animal, plot_year = plot_year, plot_taxon = idx1)
-      p1 <- p1 +
-        ylab(label1) +
-        theme(plot.title = element_text(size = 12))
-      plots[[length(plots)+1]] <- p1
-      p2 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
-                            plot_animal = plot_animal, plot_year = plot_year, plot_taxon = idx2)
-      p2 <- p2 +
-        ylab(label2) +
-        theme(plot.title = element_text(size = 12))
-      plots[[length(plots)+1]] <- p2
-      p <- grid.arrange(grobs = plots, ncol = 1, top = textGrob(paste0(plot_animal," (Y",plot_year,")")))
-      ggsave(file.path("output",paste0(data_type,"_",treatment,"_strongcorrelator.png")),
-             p, dpi = 100, units = "in", height = 6, width = 8)
+for(post_treatment_only in c(TRUE, FALSE)) {
+  for(data_type in c("16S")) {
+    if(data_type == "BOTH") {
+      all_data <- get_data(data_type = NULL, post_treatment_only = post_treatment_only)
+    } else {
+      all_data <- get_data(data_type = data_type, post_treatment_only = post_treatment_only)
     }
     
-    if(threshold > 0) {
-      # evaluate high confidence correlators at the specified threshold mean (high confidence) correlation
-      hcc <- get_high_conf_associations(treatment_data, model_output$correlations, threshold = threshold)
-      cat("Found",nrow(hcc),"high confidence interactors\n")
-      if(nrow(hcc) > 0) {
-        write_tsv(x = hcc, path = file.path("output",paste0(data_type,"_",treatment,"_highconftable.tsv")))
-        
-        # # combinations of individual x year
-        # indiv_year_combos <- data.frame(individual = model_output$X[2,], year = model_output$X[3,])
-        # indiv_year_combos <- as.data.frame(indiv_year_combos %>%
-        #   group_by(individual, year) %>%
-        #   tally())
-        # 
-        # plots <- list()
-        # #for(i in 1:nrow(indiv_year_combos)) {
-        # for(i in 1:2) {
-        #   cat(i,"\n")
-        #   p1 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
-        #                         plot_animal = indiv_year_combos[i,]$individual, plot_year = indiv_year_combos[i,]$year,
-        #                         plot_taxon = hcc[2,]$idx1, ylabel = paste0(hcc[2,]$label1, "\n", indiv_year_combos[i,]$individual))
-        #   p2 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
-        #                         plot_animal = indiv_year_combos[i,]$individual, plot_year = indiv_year_combos[i,]$year,
-        #                         plot_taxon = hcc[2,]$idx2, ylabel = paste0(hcc[2,]$label2, "\n", indiv_year_combos[i,]$individual))
-        #   plots[[length(plots) + 1]] <- p1
-        #   plots[[length(plots) + 1]] <- p2
-        # }
-        # do.call("grid.arrange", c(plots, ncol = 2))
-
-        network_file <- file.path("output","network_input.txt")
-        if(!file.exists(network_file)) {
-          write("feature_1\tfeature_2\tinteraction_strength\tfeature_1_type\tfeature_2_type\tcondition", file = network_file)
+    conditions <- c("CON", "ABX", "ABXFT")
+    for(treatment in conditions) {
+      cat("Evaluating",data_type,"x",treatment,"\n")
+      treatment_data <- pull_treatment_data(all_data, treatment = treatment)
+      # set the order of individuals in the combined series
+      canonical_animal_order <- unique(get_label_type(treatment_data, "Animal"))
+      
+      model_output <- fit_model(treatment_data, canonical_animal_order, resample_iterations = 500, get_predictions = TRUE)
+      # sanity check the fit via: diagnostic_plot(treatment_data, model_output, data_type = NULL) # plot a random feature
+      
+      # saveRDS(apply(model_output$correlations, c(1,2), mean), file = paste0(treatment, "_Sigma.rds"))
+    
+      if(data_type == "16S" & use_extra_viz) {
+        # plot correlation matrices
+        # we'll look at the average Sigma
+        mean_Sigma_corr <- apply(model_output$correlations, c(1,2), mean)
+        mean_Sigma_long <- driver::gather_array(mean_Sigma_corr, "value", "row", "col")
+        p <- ggplot(mean_Sigma_long, aes(row, col, fill=value)) + 
+          geom_tile() +
+          scale_fill_gradient2(low = "darkblue", high = "darkred", name = "correlation")
+        for(extension in c(".png")) {
+          ggsave(file.path("output",paste0(data_type,"_",treatment,"_correlmat",extension)),
+                 p, dpi = 100, units = "in", height = 8, width = 10)
         }
-        for(i in 1:nrow(hcc)) {
-          write(paste0(hcc$label1[i],"\t",hcc$label2[i],"\t",hcc$mean_correlation[i],"\t",
-                       hcc$type1[i],"\t",hcc$type2[i],"\t",treatment),
-                file = network_file,
-                append = TRUE)
+        # plot selected trajectories
+        if(treatment == "CON") {
+          idx1 <- 157
+          idx2 <- 127
         }
+        if(treatment == "ABX") {
+          idx1 <- 7
+          idx2 <- 26
+        }
+        if(treatment == "ABXFT") {
+          idx1 <- 110
+          idx2 <- 26
+        }
+        label1 <- get_taxon_label(data = treatment_data, taxon_idx = idx1, data_type = data_type)
+        label2 <- get_taxon_label(data = treatment_data, taxon_idx = idx2, data_type = data_type)
+        plots <- list()
+        plot_pair <- sample(1:ncol(model_output$X_predict))[1]
+        plot_animal <- unname(model_output$X_predict[2,plot_pair])
+        plot_year <- as.numeric(unname(model_output$X_predict[3,plot_pair]))
+        p1 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
+                              plot_animal = plot_animal, plot_year = plot_year, plot_taxon = idx1)
+        p1 <- p1 +
+          ylab(label1) +
+          theme(plot.title = element_text(size = 12))
+        plots[[length(plots)+1]] <- p1
+        p2 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
+                              plot_animal = plot_animal, plot_year = plot_year, plot_taxon = idx2)
+        p2 <- p2 +
+          ylab(label2) +
+          theme(plot.title = element_text(size = 12))
+        plots[[length(plots)+1]] <- p2
+        p <- grid.arrange(grobs = plots, ncol = 1, top = textGrob(paste0(plot_animal," (Y",plot_year,")")))
+        ggsave(file.path("output",paste0(data_type,"_",treatment,"_strongcorrelator.png")),
+               p, dpi = 100, units = "in", height = 6, width = 8)
       }
-    } else if(data_type != "BOTH") {
-      # This is no longer in use but I'm loath to throw it away.
-      correlations <- model_output$correlations
-      resample_iterations <- dim(correlations)[3]
-      for(resample_iteration in 1:resample_iterations) {
-        temp <- correlations[,,resample_iteration]
-        temp[upper.tri(temp, diag=TRUE)] <- NA
-        correlations[,,resample_iteration] <- temp
-      }
-      correlations_df <- driver::gather_array(correlations, "value", "taxon1", "taxon2", "sample")
-      # remove redundant entries and diagonal (tagged as NA)
-      correlations_df <- correlations_df[complete.cases(correlations_df),]
-      # this takes ~30 sec. to run
-      median_post_corr <- as.data.frame(correlations_df %>%
-        group_by(taxon1, taxon2) %>%
-        summarise(median = median(value),
-                  lower95 = quantile(value, probs = c(0.025)),
-                  upper95 = quantile(value, probs = c(0.975)),
-                  .groups = 'keep'))
-      bounds <- seq(0.3, 0.9, by = 0.1)
-      for(bound in bounds) {
-        cat("Evaluating pairs with correlation",bound,"to",(bound + 0.1),"\n")
-        criterion1 <- median_post_corr$median > bound
-        criterion2 <- median_post_corr$median < (bound + 0.1)
-        qualified_pairs <- which(criterion1 & criterion2)
-        cat("\tFound",length(qualified_pairs),"pairs...\n")
-        if(length(qualified_pairs) > 0) {
-          idx <- qualified_pairs[1:min(3,length(qualified_pairs))]
-          for(i in 1:length(idx)) {
-            r_idx <- idx[i]
-            idx1 <- median_post_corr$taxon1[r_idx]
-            idx2 <- median_post_corr$taxon2[r_idx]
-            # get labels for these taxa
-            label1 <- get_taxon_label(data = treatment_data, taxon_idx = idx1, data_type = data_type)
-            label2 <- get_taxon_label(data = treatment_data, taxon_idx = idx2, data_type = data_type)
-
-            plots <- list()
-            pairs_used <- c()
-            for(j in 1:min(4, length(unique(apply(model_output$X_predict[2:3,], 2, function(x) paste0(x[1], x[2])))))) {
-              # plot k instances of this pair
-              new_pair <- FALSE
-              while(!new_pair) {
-                plot_pair <- sample(1:ncol(model_output$X_predict))[1]
-                plot_animal <- unname(model_output$X_predict[2,plot_pair])
-                plot_year <- as.numeric(unname(model_output$X_predict[3,plot_pair]))
-                slug <- paste0(plot_animal,plot_year)
-                if(!(slug %in% pairs_used)) {
-                  new_pair <- TRUE
+      
+      if(threshold > 0) {
+        # evaluate high confidence correlators at the specified threshold mean (high confidence) correlation
+        hcc <- get_high_conf_associations(treatment_data, model_output$correlations, threshold = threshold)
+        cat("Found",nrow(hcc),"high confidence interactors\n")
+        if(nrow(hcc) > 0) {
+          write_tsv(x = hcc, path = file.path("output",paste0(data_type,"_",treatment,"_highconftable.tsv")))
+          
+          # # combinations of individual x year
+          # indiv_year_combos <- data.frame(individual = model_output$X[2,], year = model_output$X[3,])
+          # indiv_year_combos <- as.data.frame(indiv_year_combos %>%
+          #   group_by(individual, year) %>%
+          #   tally())
+          # 
+          # plots <- list()
+          # #for(i in 1:nrow(indiv_year_combos)) {
+          # for(i in 1:2) {
+          #   cat(i,"\n")
+          #   p1 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
+          #                         plot_animal = indiv_year_combos[i,]$individual, plot_year = indiv_year_combos[i,]$year,
+          #                         plot_taxon = hcc[2,]$idx1, ylabel = paste0(hcc[2,]$label1, "\n", indiv_year_combos[i,]$individual))
+          #   p2 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
+          #                         plot_animal = indiv_year_combos[i,]$individual, plot_year = indiv_year_combos[i,]$year,
+          #                         plot_taxon = hcc[2,]$idx2, ylabel = paste0(hcc[2,]$label2, "\n", indiv_year_combos[i,]$individual))
+          #   plots[[length(plots) + 1]] <- p1
+          #   plots[[length(plots) + 1]] <- p2
+          # }
+          # do.call("grid.arrange", c(plots, ncol = 2))
+  
+          if(post_treatment_only) {
+            network_file <- file.path("output","network_input_post.txt")
+          } else {
+            network_file <- file.path("output","network_input_during-post.txt")
+          }
+          if(!file.exists(network_file)) {
+            write("feature_1\tfeature_2\tinteraction_strength\tfeature_1_type\tfeature_2_type\tcondition", file = network_file)
+          }
+          for(i in 1:nrow(hcc)) {
+            write(paste0(hcc$label1[i],"\t",hcc$label2[i],"\t",hcc$mean_correlation[i],"\t",
+                         hcc$type1[i],"\t",hcc$type2[i],"\t",treatment),
+                  file = network_file,
+                  append = TRUE)
+          }
+        }
+      } else if(data_type != "BOTH") {
+        # This is no longer in use but I'm loath to throw it away.
+        correlations <- model_output$correlations
+        resample_iterations <- dim(correlations)[3]
+        for(resample_iteration in 1:resample_iterations) {
+          temp <- correlations[,,resample_iteration]
+          temp[upper.tri(temp, diag=TRUE)] <- NA
+          correlations[,,resample_iteration] <- temp
+        }
+        correlations_df <- driver::gather_array(correlations, "value", "taxon1", "taxon2", "sample")
+        # remove redundant entries and diagonal (tagged as NA)
+        correlations_df <- correlations_df[complete.cases(correlations_df),]
+        # this takes ~30 sec. to run
+        median_post_corr <- as.data.frame(correlations_df %>%
+          group_by(taxon1, taxon2) %>%
+          summarise(median = median(value),
+                    lower95 = quantile(value, probs = c(0.025)),
+                    upper95 = quantile(value, probs = c(0.975)),
+                    .groups = 'keep'))
+        bounds <- seq(0.3, 0.9, by = 0.1)
+        for(bound in bounds) {
+          cat("Evaluating pairs with correlation",bound,"to",(bound + 0.1),"\n")
+          criterion1 <- median_post_corr$median > bound
+          criterion2 <- median_post_corr$median < (bound + 0.1)
+          qualified_pairs <- which(criterion1 & criterion2)
+          cat("\tFound",length(qualified_pairs),"pairs...\n")
+          if(length(qualified_pairs) > 0) {
+            idx <- qualified_pairs[1:min(3,length(qualified_pairs))]
+            for(i in 1:length(idx)) {
+              r_idx <- idx[i]
+              idx1 <- median_post_corr$taxon1[r_idx]
+              idx2 <- median_post_corr$taxon2[r_idx]
+              # get labels for these taxa
+              label1 <- get_taxon_label(data = treatment_data, taxon_idx = idx1, data_type = data_type)
+              label2 <- get_taxon_label(data = treatment_data, taxon_idx = idx2, data_type = data_type)
+  
+              plots <- list()
+              pairs_used <- c()
+              for(j in 1:min(4, length(unique(apply(model_output$X_predict[2:3,], 2, function(x) paste0(x[1], x[2])))))) {
+                # plot k instances of this pair
+                new_pair <- FALSE
+                while(!new_pair) {
+                  plot_pair <- sample(1:ncol(model_output$X_predict))[1]
+                  plot_animal <- unname(model_output$X_predict[2,plot_pair])
+                  plot_year <- as.numeric(unname(model_output$X_predict[3,plot_pair]))
+                  slug <- paste0(plot_animal,plot_year)
+                  if(!(slug %in% pairs_used)) {
+                    new_pair <- TRUE
+                  }
                 }
+                pairs_used <- c(pairs_used, slug)
+  
+                p1 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
+                                      plot_animal = plot_animal, plot_year = plot_year, plot_taxon = idx1)
+                p1 <- p1 +
+                  ggtitle(paste0(plot_animal," (Y",plot_year,")")) +
+                  theme(plot.title = element_text(size = 12))
+                plots[[length(plots)+1]] <- p1
+                p2 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
+                                      plot_animal = plot_animal, plot_year = plot_year, plot_taxon = idx2)
+                p2 <- p2 +
+                  ggtitle(paste0(plot_animal," (Y",plot_year,")")) +
+                  theme(plot.title = element_text(size = 12))
+                plots[[length(plots)+1]] <- p2
               }
-              pairs_used <- c(pairs_used, slug)
-
-              p1 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
-                                    plot_animal = plot_animal, plot_year = plot_year, plot_taxon = idx1)
-              p1 <- p1 +
-                ggtitle(paste0(plot_animal," (Y",plot_year,")")) +
-                theme(plot.title = element_text(size = 12))
-              plots[[length(plots)+1]] <- p1
-              p2 <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
-                                    plot_animal = plot_animal, plot_year = plot_year, plot_taxon = idx2)
-              p2 <- p2 +
-                ggtitle(paste0(plot_animal," (Y",plot_year,")")) +
-                theme(plot.title = element_text(size = 12))
-              plots[[length(plots)+1]] <- p2
+  
+              p <- grid.arrange(grobs = plots, ncol = 2, top = textGrob(paste0(label1," x ",label2,"\n",
+                                                                               "median correlation: ",round(median_post_corr$median[r_idx], 2),"\n",
+                                                                               "95% interval: (",round(median_post_corr$lower95[r_idx], 2),", ",
+                                                                                                round(median_post_corr$upper95[r_idx], 2),")")))
+              ggsave(file.path("output","diagnostic",paste0(data_type,"_",treatment,"_interval_",bound,"_",i,".png")),
+                     p, dpi = 100, units = "in", height = 10, width = 10)
             }
-
-            p <- grid.arrange(grobs = plots, ncol = 2, top = textGrob(paste0(label1," x ",label2,"\n",
-                                                                             "median correlation: ",round(median_post_corr$median[r_idx], 2),"\n",
-                                                                             "95% interval: (",round(median_post_corr$lower95[r_idx], 2),", ",
-                                                                                              round(median_post_corr$upper95[r_idx], 2),")")))
-            ggsave(file.path("output","diagnostic",paste0(data_type,"_",treatment,"_interval_",bound,"_",i,".png")),
-                   p, dpi = 100, units = "in", height = 10, width = 10)
           }
         }
       }
-    }
-
-    if(plot_all_taxa) {
-      # plot logratio change in all taxa, so we can see which were killed off by the antibiotics
   
-      # combinations of individual x year
-      indiv_year_combos <- data.frame(individual = model_output$X[2,], year = model_output$X[3,])
-      indiv_year_combos <- as.data.frame(indiv_year_combos %>%
-        group_by(individual, year) %>%
-        tally())
-      
-      limit <- 10
-      plot_height <- 12
-      if(treatment %in% c("ABX", "ABXFT")) {
-        limit <- nrow(treatment_data$`16S`$year1$filtered)
-        plot_height <- 8
-      }
-      for(tax_idx in 1:limit) {
-        cat("Plotting taxon",tax_idx,"\n")
-        plots <- list()
-        tax_label <- get_taxon_label(treatment_data, taxon_idx = tax_idx, data_type = data_type)
-        for(i in 1:nrow(indiv_year_combos)) {
-          p <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
-                                plot_animal = indiv_year_combos[i,]$individual, plot_year = indiv_year_combos[i,]$year,
-                                plot_taxon = tax_idx, ylabel = paste0(indiv_year_combos[i,]$individual, " (Year ",indiv_year_combos[i,]$year,")"))
-          plots[[length(plots) + 1]] <- p
+      if(plot_all_taxa) {
+        # plot logratio change in all taxa, so we can see which were killed off by the antibiotics
+    
+        # combinations of individual x year
+        indiv_year_combos <- data.frame(individual = model_output$X[2,], year = model_output$X[3,])
+        indiv_year_combos <- as.data.frame(indiv_year_combos %>%
+          group_by(individual, year) %>%
+          tally())
+        
+        limit <- 10
+        plot_height <- 12
+        if(treatment %in% c("ABX", "ABXFT")) {
+          limit <- nrow(treatment_data$`16S`$year1$filtered)
+          plot_height <- 8
         }
-        p <- grid.arrange(grobs = plots, top = tax_label, ncol = 2)
-        ggsave(file.path("output", treatment, paste0("taxon_",tax_idx,".png")), plot = p, units = "in",
-               dpi = 150, height = plot_height, width = 6)
+        for(tax_idx in 1:limit) {
+          cat("Plotting taxon",tax_idx,"\n")
+          plots <- list()
+          tax_label <- get_taxon_label(treatment_data, taxon_idx = tax_idx, data_type = data_type)
+          for(i in 1:nrow(indiv_year_combos)) {
+            p <- plot_predictive(model_output$predictions, treatment_data, model_output$X_predict,
+                                  plot_animal = indiv_year_combos[i,]$individual, plot_year = indiv_year_combos[i,]$year,
+                                  plot_taxon = tax_idx, ylabel = paste0(indiv_year_combos[i,]$individual, " (Year ",indiv_year_combos[i,]$year,")"))
+            plots[[length(plots) + 1]] <- p
+          }
+          p <- grid.arrange(grobs = plots, top = tax_label, ncol = 2)
+          ggsave(file.path("output", treatment, paste0("taxon_",tax_idx,".png")), plot = p, units = "in",
+                 dpi = 150, height = plot_height, width = 6)
+        }
+        
+        # taxa are really different! validate by looking at direct data?
+        # md <- treatment_data$`16S`$year2$metadata
+        # counts <- treatment_data$`16S`$year2$filtered
+        # clr.counts <- as.matrix(counts)
+        # clr.counts <- t(clr(t(clr.counts) + 0.5))
+        # selected_samples <- md[md$Animal == "Onyx" & md$Year == 2,]$Description
+        # selected_days <- md[md$Animal == "Onyx" & md$Year == 2,]$Day
+        # plot(selected_days, clr.counts[1,colnames(counts) %in% selected_samples])
       }
-      
-      # taxa are really different! validate by looking at direct data?
-      # md <- treatment_data$`16S`$year2$metadata
-      # counts <- treatment_data$`16S`$year2$filtered
-      # clr.counts <- as.matrix(counts)
-      # clr.counts <- t(clr(t(clr.counts) + 0.5))
-      # selected_samples <- md[md$Animal == "Onyx" & md$Year == 2,]$Description
-      # selected_days <- md[md$Animal == "Onyx" & md$Year == 2,]$Day
-      # plot(selected_days, clr.counts[1,colnames(counts) %in% selected_samples])
     }
   }
-  if(data_type != "BOTH") {
-    plot_network(network_file, data_type = data_type, conditions = conditions, which_sign = NULL, show_plot = FALSE)
-  }
+}
+
+if(data_type != "BOTH") {
+  plot_network(data_type = "16S", conditions = c("CON", "ABX", "ABXFT"), which_sign = NULL, show_plot = FALSE)
 }
 
 
